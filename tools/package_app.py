@@ -56,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix="fl-ara-package-", dir=out) as scratch:
     staging = Path(scratch)
     shutil.copytree(app, staging / app.name, symlinks=True)
     (staging / "Applications").symlink_to("/Applications")
-    (staging / "Install and start.txt").write_text(
+    ordinary_instructions = (
         f"Drag {args.name}.app to Applications, then open it.\n\n"
         f"Requires {args.requirements}.\n"
         "No Python, compiler, vendor application binaries, third-party plugins or licenses are included.\n\n"
@@ -67,6 +67,20 @@ with tempfile.TemporaryDirectory(prefix="fl-ara-package-", dir=out) as scratch:
         "This is an experimental candidate, independent of Image-Line and plugin vendors.\n"
         "Compatibility testing is still in progress. It is not a qualified public release.\n"
     )
+    if manifest.get("runtime_admission_scope") == "bare-startup-test-only":
+        instructions = (
+            "OWNER-LOCAL BARE STARTUP TEST ONLY. NOT A PUBLIC INSTALLER.\n\n"
+            "This candidate admits only a blank FL startup with command-line option\n"
+            "--test-device 'Pro Tools Audio Bridge 2-A_UID'.\n"
+            "Project loading and normal audio/device launch are blocked.\n"
+            "No ARA editing, saving, playback or third-party behavior is qualified.\n"
+            "Use only the integration owner's exact --fl and --cache-root command.\n"
+            "Do not copy this candidate over an installed FL or plugin.\n"
+            "The bundled helper's original research manifest remains unqualified.\n"
+        )
+    else:
+        instructions = ordinary_instructions
+    (staging / "Install and start.txt").write_text(instructions)
     run("/usr/bin/hdiutil", "create", "-ov", "-format", "UDZO", "-volname", args.name, "-srcfolder", staging, dmg_path)
 if args.identity:
     run("/usr/bin/codesign", "--sign", identity, "--timestamp", dmg_path)

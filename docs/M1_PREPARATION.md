@@ -26,7 +26,7 @@ helper, this is the exact blank-project test command on M1 (no `open`, `--args`
 or `--` routing):
 
 ```sh
-'/Users/jordanrys/Documents/Rys Up Audio/Development Resources/Research/ARA App Integration/2026-10-24/tools/fl-launcher/FL ARA Launcher.app/Contents/MacOS/FL ARA Launcher' \
+'/Users/jordanrys/Documents/Rys Up Audio/Development Resources/Research/ARA App Integration/2026-10-24/bare-startup-candidate/FL ARA Launcher.app/Contents/MacOS/FL ARA Launcher' \
   --fl '/Users/jordanrys/Documents/Rys Up Audio/Development Resources/Research/ARA App Integration/2026-10-24/references/FL Studio 2026.app' \
   --cache-root '/Users/jordanrys/Documents/Rys Up Audio/Development Resources/Research/ARA App Integration/2026-10-24/runtime/fl-launcher-cache' \
   --test-device 'Pro Tools Audio Bridge 2-A_UID'
@@ -52,3 +52,18 @@ licensed mode or saving support from the reference/copy signature checks. Any
 future route must return existing authorized registration reads in memory,
 leave the vendor's validation unchanged, prevent original writes, and keep secret
 values out of the private registry, files, environment and logs.
+
+## Actual R2 bare-startup candidate staging
+
+The owner-local app was built and transferred to
+`.../2026-10-24/bare-startup-candidate/FL ARA Launcher.app`. M1 deep strict
+signature, version and packaged-helper hash checks passed. This preparation did
+not launch it; the root integration owner controls the runtime test. The packaged
+helper SHA256 is `1fc01ae32ca4ecd2ec3d3c4aa7b1cc541151b7c181c958ee75229ad4406f9c37`
+(ad-hoc signature metadata differs from the unchanged research helper c3b404…).
+The test admission is enforced: exact virtualUID, blank startup only, no project.
+Every runtime and third-party qualification flag remains false.
+
+Local DMG/ZIP/receipt:
+`/Volumes/Razer SSD/Rys Up Audio Archive/Development Resources/ARA App Integration/fl-launcher-build/r2-bare-packages/`.
+The original research helper manifest's `runtime_ready:false` remains unchanged.

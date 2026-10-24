@@ -2,7 +2,6 @@
 // vendor signatures and native creation arguments are never changed.
 #include "FLNativeApplication.h"
 #include "RegistrationReadThrough.h"
-#import <Foundation/Foundation.h>
 #include <CoreAudio/CoreAudio.h>
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -104,16 +103,10 @@ bool initializeNativeApplication(const NativeApplicationCallbacks& callbacks)noe
     s.log=open((folder+"/native-app.jsonl").c_str(),O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);if(s.log<0)return false;
     s.app.runID=run;s.app.runDirectory=folder;s.app.executablePath=exe;s.app.executableSHA256=exeSHA;s.app.enginePath=engine;s.app.wrapperPath=wrapper;s.app.processID=getpid();s.app.parentProcessID=getppid();s.app.admitted=true;s.callbacks=callbacks;
     if(uid)s.testDeviceUID=uid;
-    // Keep file-panel preferences in this private-home process. The remote
-    // AppKit panel service uses the original client's preference identity.
-    // Use the existing native local-panel setting without adding arguments
-    // which FL's own command-line parser could treat as project options.
-    NSUserDefaults* defaults=[NSUserDefaults standardUserDefaults];
-    NSMutableDictionary* arguments=[[defaults volatileDomainForName:NSArgumentDomain] mutableCopy];
-    if(!arguments)arguments=[NSMutableDictionary dictionary];
-    arguments[@"NSUseRemoteSavePanel"]=@NO;
-    [defaults setVolatileDomain:arguments forName:NSArgumentDomain];
-    if([defaults boolForKey:@"NSUseRemoteSavePanel"])return false;
+    // Preserve native file-panel behavior. The OS panel service can share its
+    // navigation history with the source application's domain. Do not force
+    // private local panels: the native control failed normal saving on the
+    // tested OS. Navigation history is distinct from DAW/audio configuration.
     if(const char* registry=getenv("RYSUP_FLARA_ORIGINAL_REGISTRY_PATH");registry&&*registry){
         RegistrationReadOptions options;options.originalRegistryPath=registry;
         options.exactWinBridgePath=app+"/Contents/Resources/FL/Shared/libwinbridge_x64.dylib";

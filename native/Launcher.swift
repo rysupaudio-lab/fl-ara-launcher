@@ -332,7 +332,7 @@ final class Session {
                        "RYSUP_FLARA_SESSION_MANIFEST": manifest.path, "RYSUP_FLARA_EXPECTED_HELPER_SHA256": helperHash, "CFFIXED_USER_HOME": home.path, "TMPDIR": tmp.path,
                        "RYSUP_FLARA_RUN_ID": runID, "RYSUP_FLARA_EXPECTED_EXE": app.appendingPathComponent(executablePath).path,
                        "RYSUP_FLARA_EXPECTED_PARENT_PID": String(getpid()), "RYSUP_FLARA_RUN_DIR": run.path,
-                       "RYSUP_FLARA_SOURCE_APP": source.path, "RYSUP_FLARA_PROJECT_PATH": project?.path ?? "",
+                       "RYSUP_FLARA_SOURCE_APP": source.path, "RYSUP_FLARA_ORIGINAL_REGISTRY_PATH": fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Preferences/Image-Line/reg.xml").path, "RYSUP_FLARA_PROJECT_PATH": project?.path ?? "",
                        "RYSUP_FLARA_MODE": testDevice == nil ? "normal" : "test"]) { _, new in new }
             if let testDevice { env["RYSUP_FLARA_TEST_AUDIO_DEVICE_UID"] = testDevice }
             let consoleURL = run.appendingPathComponent("console.log"); fm.createFile(atPath: consoleURL.path, contents: nil, attributes: [.posixPermissions: 0o600])

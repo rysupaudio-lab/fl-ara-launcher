@@ -140,7 +140,7 @@ func prepareSandbox(_ run: URL, source: URL, normalData: URL) throws -> (URL, UR
     for item in [profile, trampoline] { try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: item.path) }
     return (profile, trampoline)
 }
-func validateHelper(_ helper: URL) throws {
+@discardableResult func validateHelper(_ helper: URL) throws -> [String: Any] {
     let manifest = helper.deletingLastPathComponent().appendingPathComponent("helper.json")
     guard let row = try JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [String: Any],
           row["schema"] as? String == "rysup.fl-ara-helper/1", row["runtime_ready"] as? Bool == true,
@@ -148,6 +148,7 @@ func validateHelper(_ helper: URL) throws {
         throw fail("The FL native helper is absent, unsealed, or still a placeholder. Runtime launch is disabled.")
     }
     try command("/usr/bin/codesign", ["--verify", "--strict", helper.path])
+    return row
 }
 func handlerSnapshot() -> String? {
     guard let type = UTType(filenameExtension: "flp") else { return nil }
@@ -286,7 +287,10 @@ final class Session {
     init(cache: URL, helper: URL) { self.cache = cache.standardizedFileURL; self.helper = canonical(helper) }
     func launch(source: URL, project: URL?, testDevice: String? = nil) throws {
         if let testDevice, testDevice != "Pro Tools Audio Bridge 2-A_UID" { throw fail("Test mode permits only Pro Tools Audio Bridge 2-A_UID.") }
-        try validateHelper(helper)
+        let admission = try validateHelper(helper)
+        if admission["runtime_admission_scope"] as? String == "bare-startup-test-only" {
+            guard testDevice == "Pro Tools Audio Bridge 2-A_UID", project == nil else { throw fail("This owner-local test candidate admits only a blank startup with the exact virtual test device; project loading and normal audio are disabled.") }
+        }
         let existing = try command("/bin/ps", ["-axo", "comm="]).split(separator: "\n").contains { URL(fileURLWithPath: String($0).trimmingCharacters(in: .whitespaces)).lastPathComponent == "OsxFL" }
         guard !existing else { throw fail("An FL Studio application is already running. Leave that session intact and quit it normally before launching the private copy.") }
         let source = canonical(source)
@@ -353,7 +357,7 @@ final class Session {
             }
             guard ready else { throw fail("Bridge startup was not confirmed. Any live FL Studio copy is preserved. See \(run.path).") }
             receipt["status"] = "running"; try jsonWrite(receipt, manifest); unregister(app)
-            changed("ARA bridge ready. Use the visible FL Studio copy normally. Quit that copy when finished.\nDiagnostics: \(run.path)")
+            changed("Native FL engine ready. Experimental ARA compatibility still requires qualification. Quit this private copy when finished.\nDiagnostics: \(run.path)")
             print("Private FL Studio PID \(task.processIdentifier). Diagnostics: \(run.path)")
             while task.isRunning {
                 let duplicates = try liveExactProcesses(app.appendingPathComponent(executablePath)).filter { $0 != task.processIdentifier }

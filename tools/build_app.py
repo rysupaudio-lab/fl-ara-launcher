@@ -18,7 +18,7 @@ if a.compile_only:
 if a.helper is None or a.helper_manifest is None:
     p.error('Both --helper and --helper-manifest are required. Placeholder helpers cannot be packaged.')
 helper = a.helper.resolve(strict=True); manifest = json.loads(a.helper_manifest.read_text())
-digest = hashlib.file_digest(helper.open('rb'), 'sha256').hexdigest()
+digest = hashlib.sha256(helper.read_bytes()).hexdigest()
 if manifest.get('schema') != 'rysup.fl-ara-helper/1' or manifest.get('runtime_ready') is not True or manifest.get('binary') != 'FLAppBridge.dylib' or manifest.get('sha256') != digest:
     p.error('Helper manifest is not ready or does not match exact helper bytes')
 subprocess.run(['/usr/bin/codesign','--verify','--strict',str(helper)],check=True)
@@ -31,5 +31,6 @@ entry=macos/'FL ARA Launcher'
 subprocess.run(['xcrun','swiftc','-target','arm64-apple-macos15.4','-O','-module-cache-path',str(out/'.swift-module-cache'),str(root/'native/Launcher.swift'),'-o',str(entry)],check=True,env=build_env)
 with (app/'Contents/Info.plist').open('wb') as stream:
     plistlib.dump({'CFBundleIdentifier':'com.rysupaudio.fl-ara-launcher','CFBundleName':'FL ARA Launcher','CFBundleExecutable':entry.name,'CFBundlePackageType':'APPL','CFBundleShortVersionString':'0.1.0','CFBundleVersion':'1','LSMinimumSystemVersion':'15.4','LSArchitecturePriority':['arm64'],'NSHighResolutionCapable':True,'NSHumanReadableCopyright':'Copyright 2026 Rys Up Audio LLC. MIT License. Independent of Image-Line.'},stream)
-for name in ['LICENSE','README.md']: shutil.copy2(root/name, resources/name)
+for name in ['LICENSE','README.md','THIRD_PARTY_NOTICES.md']: shutil.copy2(root/name, resources/name)
+shutil.copytree(root/'third_party_licenses', resources/'ThirdPartyLicenses')
 print(app)

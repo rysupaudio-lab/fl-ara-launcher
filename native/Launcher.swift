@@ -1,0 +1,443 @@
+// Native app and CLI: no Python, compiler or Apple binaries in the distribution.
+import AppKit
+import CryptoKit
+import Darwin
+import CoreServices
+import UniformTypeIdentifiers
+
+let launcherVersion = "0.1.0-candidate.1"
+let enginePath = "Contents/Libs/FLEngine_x64.dylib"
+let executablePath = "Contents/MacOS/OsxFL"
+let engineHash = "8d23eebf0fc63fdd1957ba2c8d0f1f1d4e053a9f43173d3c22606c47ace7b76d"
+let executableHash = "5be78aa9f9f066f3b28747b48357769b70979e859b42661f2af7163f08e57aab"
+let fm = FileManager.default
+struct LaunchError: LocalizedError { let message: String; var errorDescription: String? { message } }
+func fail(_ message: String) -> LaunchError { LaunchError(message: message) }
+func canonical(_ url: URL) -> URL { url.standardizedFileURL.resolvingSymlinksInPath() }
+func digest(_ url: URL) throws -> String {
+    let stream = try FileHandle(forReadingFrom: url)
+    defer { try? stream.close() }
+    var hash = SHA256()
+    while let data = try stream.read(upToCount: 1024 * 1024), !data.isEmpty { hash.update(data: data) }
+    return hash.finalize().map { String(format: "%02x", $0) }.joined()
+}
+@discardableResult func command(_ executable: String, _ arguments: [String]) throws -> String {
+    let task = Process(); task.executableURL = URL(fileURLWithPath: executable); task.arguments = arguments
+    let pipe = Pipe(); task.standardOutput = pipe; task.standardError = pipe
+    try task.run()
+    let data = pipe.fileHandleForReading.readDataToEndOfFile(); task.waitUntilExit()
+    let output = String(decoding: data, as: UTF8.self)
+    guard task.terminationStatus == 0 else { throw fail("\(URL(fileURLWithPath: executable).lastPathComponent) failed: \(output.trimmingCharacters(in: .whitespacesAndNewlines))") }
+    return output
+}
+func inspect(_ input: URL) throws -> [String: Any] {
+    #if !arch(arm64)
+    throw fail("This release requires a native Apple Silicon Mac.")
+    #endif
+    var translated: Int32 = 0; var size = MemoryLayout<Int32>.size
+    if sysctlbyname("sysctl.proc_translated", &translated, &size, nil, 0) == 0, translated != 0 {
+        throw fail("Run natively on Apple Silicon; Rosetta is unsupported.")
+    }
+    let app = canonical(input)
+    let data = try Data(contentsOf: app.appendingPathComponent("Contents/Info.plist"))
+    guard let info = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+          info["CFBundleIdentifier"] as? String == "com.image-line.flstudio",
+          info["CFBundleShortVersionString"] as? String == "26.1.7.5421", info["CFBundleVersion"] as? String == "26.1.7.5421" else {
+        throw fail("Unsupported FL Studio installation. This candidate supports only original vendor-signed FL Studio 26.1.7.5421.")
+    }
+    guard try digest(app.appendingPathComponent(enginePath)) == engineHash,
+          try digest(app.appendingPathComponent(executablePath)) == executableHash else { throw fail("FL Studio executable/framework hashes differ from the qualified build. Refusing to launch.") }
+    try command("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
+    try command("/usr/bin/codesign", ["--verify", "-R=anchor apple generic and identifier \"com.image-line.flstudio\" and certificate leaf[subject.OU] = \"N68WEP5ZZZ\"", app.path])
+    return ["source": app.path, "version": "26.1.7.5421", "build": "26.1.7.5421", "engine_sha256": engineHash,
+            "executable_sha256": executableHash]
+}
+let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+func unregister(_ app: URL) { _ = try? command(lsregister, ["-u", app.path]) }
+func jsonWrite(_ value: [String: Any], _ path: URL) throws {
+    try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]).write(to: path, options: .atomic)
+}
+func childAlive(_ pid: Int32) -> Bool { kill(pid, 0) == 0 || errno == EPERM }
+func rejectSymlinkAncestors(_ url: URL) throws {
+    let standardized = url.standardizedFileURL
+    var item = standardized
+    while item.path != "/" {
+        if fm.fileExists(atPath: item.path), canonical(item) != item { throw fail("Private cache ancestors must not contain symlinks.") }
+        item.deleteLastPathComponent()
+    }
+}
+func xmlEscape(_ value: String) -> String { value.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;") }
+func preparePrivateHome(_ home: URL, tmp: URL, userData: URL) throws {
+    for folder in [home, tmp, userData, home.appendingPathComponent("Library/Preferences/Image-Line"), home.appendingPathComponent("Library/Application Support"), home.appendingPathComponent("Documents"), home.appendingPathComponent("Desktop")] {
+        try rejectSymlinkAncestors(folder)
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    }
+    // Deliberately synthesize only path settings. Never read or duplicate license keys,
+    // the original Image-Line registry, whole home folders or write-through symlinks.
+    let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><XMLReg><Key Name=\"Key1\"><Key Name=\"HKEY_CURRENT_USER\"><Key Name=\"Software\"><Key Name=\"Image-Line\"><Key Name=\"Shared\"><Key Name=\"Paths\"><Value Name=\"Shared data\" Type=\"2\">\(xmlEscape(userData.path + "/"))</Value></Key></Key></Key></Key></Key></Key></XMLReg>"
+    let registry = home.appendingPathComponent("Library/Preferences/Image-Line/reg.xml")
+    try Data(xml.utf8).write(to: registry, options: .atomic)
+    try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: registry.path)
+}
+final class SharedPathReader: NSObject, XMLParserDelegate {
+    var stack: [(String, String?)] = []; var captured: [String] = []; var text = ""; var active = false
+    func parser(_ parser: XMLParser, didStartElement element: String, namespaceURI: String?, qualifiedName: String?, attributes attributesDict: [String: String]) {
+        stack.append((element, attributesDict["Name"]))
+        if element == "Value", attributesDict["Name"] == "Shared data", attributesDict["Type"] == "2",
+           stack.dropLast().filter({ $0.0 == "Key" }).compactMap({ $0.1 }).suffix(5).elementsEqual(["HKEY_CURRENT_USER", "Software", "Image-Line", "Shared", "Paths"]) { active = true; text = "" }
+    }
+    func parser(_ parser: XMLParser, foundCharacters string: String) { if active { text += string } }
+    func parser(_ parser: XMLParser, didEndElement element: String, namespaceURI: String?, qualifiedName: String?) {
+        if active && element == "Value" { captured.append(text); active = false }; if !stack.isEmpty { stack.removeLast() }
+    }
+}
+func normalUserDataPath() throws -> URL {
+    let realHome = fm.homeDirectoryForCurrentUser
+    let registry = realHome.appendingPathComponent("Library/Preferences/Image-Line/reg.xml")
+    guard fm.fileExists(atPath: registry.path) else { return realHome.appendingPathComponent("Documents/Image-Line") }
+    let data = try Data(contentsOf: registry)
+    guard !data.contains(0), !String(decoding: data, as: UTF8.self).uppercased().contains("<!DOCTYPE") else { throw fail("Unexpected Image-Line registry XML; refusing a fallback profile.") }
+    let reader = SharedPathReader(), parser = XMLParser(data: data); parser.delegate = reader; parser.shouldResolveExternalEntities = false
+    guard parser.parse(), reader.captured.count == 1, reader.captured[0].hasPrefix("/") else { throw fail("Cannot determine exact existing FL user-data location without guessing.") }
+    let result = canonical(URL(fileURLWithPath: reader.captured[0]))
+    guard !["/", realHome.path, realHome.appendingPathComponent("Documents").path, realHome.appendingPathComponent("Library").path].contains(result.path) else { throw fail("Configured FL user-data path is too broad for safe isolation.") }
+    return result
+}
+func physicalPath(_ url: URL) -> String {
+    if let pointer = realpath(url.path, nil) { defer { free(pointer) }; return String(cString: pointer) }
+    guard url.path != "/" else { return "/" }
+    let parent = physicalPath(url.deletingLastPathComponent())
+    return (parent == "/" ? "" : parent) + "/" + url.lastPathComponent
+}
+func sandboxLiteral(_ path: String) throws -> String {
+    guard !path.contains("\n"), !path.contains("\r"), !path.contains("\0") else { throw fail("Unsupported control character in protected path.") }
+    return "\"" + path.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
+}
+func prepareSandbox(_ run: URL, source: URL, normalData: URL) throws -> (URL, URL) {
+    guard fm.isExecutableFile(atPath: "/usr/bin/sandbox-exec") else { throw fail("Required child-only write sandbox is unavailable.") }
+    let home = fm.homeDirectoryForCurrentUser
+    var protected = [source, home.appendingPathComponent("Library/Preferences/Image-Line"), normalData,
+                     URL(fileURLWithPath: "/Library/Audio/Plug-Ins"), home.appendingPathComponent("Library/Audio/Plug-Ins")]
+    let preferences = home.appendingPathComponent("Library/Preferences")
+    if let entries = try? fm.contentsOfDirectory(at: preferences, includingPropertiesForKeys: nil) {
+        protected += entries.filter { $0.lastPathComponent.hasPrefix("com.image-line.") }
+    }
+    // Also protect the backing bundles of directly installed plugin symlinks.
+    // Enumerate only the named plugin directories; never recurse through links.
+    for base in [URL(fileURLWithPath: "/Library/Audio/Plug-Ins"), home.appendingPathComponent("Library/Audio/Plug-Ins")] {
+        for type in ["Components", "VST3", "VST"] {
+            if let bundles = try? fm.contentsOfDirectory(at: base.appendingPathComponent(type), includingPropertiesForKeys: nil) {
+                protected += bundles.filter { ["component", "vst3", "vst"].contains($0.pathExtension.lowercased()) }
+            }
+        }
+    }
+    let paths = try protected.map { "(subpath " + (try sandboxLiteral(physicalPath($0))) + ")" }.joined(separator: " ")
+    let profile = run.appendingPathComponent("write-sandbox.sb"), trampoline = run.appendingPathComponent("exec-private-fl.sh")
+    try Data(("(version 1) (allow default) (deny file-write* (require-any " + paths + "))\n").utf8).write(to: profile, options: .atomic)
+    try Data("#!/bin/sh\nset -eu\nexport DYLD_INSERT_LIBRARIES=\"$RYSUP_FLARA_HELPER_PATH\"\nexec \"$RYSUP_FLARA_EXPECTED_EXE\" \"$@\"\n".utf8).write(to: trampoline, options: .atomic)
+    for item in [profile, trampoline] { try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: item.path) }
+    return (profile, trampoline)
+}
+func validateHelper(_ helper: URL) throws {
+    let manifest = helper.deletingLastPathComponent().appendingPathComponent("helper.json")
+    guard let row = try JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [String: Any],
+          row["schema"] as? String == "rysup.fl-ara-helper/1", row["runtime_ready"] as? Bool == true,
+          row["binary"] as? String == helper.lastPathComponent, row["sha256"] as? String == (try digest(helper)) else {
+        throw fail("The FL native helper is absent, unsealed, or still a placeholder. Runtime launch is disabled.")
+    }
+    try command("/usr/bin/codesign", ["--verify", "--strict", helper.path])
+}
+func handlerSnapshot() -> String? {
+    guard let type = UTType(filenameExtension: "flp") else { return nil }
+    return LSCopyDefaultRoleHandlerForContentType(type.identifier as CFString, LSRolesMask.all)?.takeRetainedValue() as String?
+}
+func preserveHandler(_ original: String?) {
+    guard let original, handlerSnapshot() != original, let type = UTType(filenameExtension: "flp") else { return }
+    LSSetDefaultRoleHandlerForContentType(type.identifier as CFString, LSRolesMask.all, original as CFString)
+}
+final class OwnedChild {
+    private(set) var processIdentifier: Int32 = 0
+    private(set) var terminationStatus: Int32 = 0
+    private var finished = false
+    init(executable: URL, arguments: [String], environment: [String: String], directory: URL, console: FileHandle) throws {
+        var actions: posix_spawn_file_actions_t?; var attributes: posix_spawnattr_t?
+        posix_spawn_file_actions_init(&actions); posix_spawnattr_init(&attributes)
+        defer { posix_spawn_file_actions_destroy(&actions); posix_spawnattr_destroy(&attributes) }
+        posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0)
+        posix_spawn_file_actions_adddup2(&actions, console.fileDescriptor, STDOUT_FILENO)
+        posix_spawn_file_actions_adddup2(&actions, console.fileDescriptor, STDERR_FILENO)
+        posix_spawn_file_actions_addchdir_np(&actions, directory.path)
+        // A terminal interrupt to the launcher must never terminate the user's FL Studio session.
+        posix_spawnattr_setpgroup(&attributes, 0)
+        posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT))
+        var argv = ([executable.path] + arguments).map { strdup($0) } + [nil]
+        var envp = environment.sorted { $0.key < $1.key }.map { strdup("\($0.key)=\($0.value)") } + [nil]
+        defer { argv.forEach { free($0) }; envp.forEach { free($0) } }
+        let result = argv.withUnsafeMutableBufferPointer { av in envp.withUnsafeMutableBufferPointer { ev in
+            posix_spawn(&processIdentifier, executable.path, &actions, &attributes, av.baseAddress!, ev.baseAddress!)
+        } }
+        guard result == 0 else { throw fail("Could not start the private FL Studio copy: \(String(cString: strerror(result)))") }
+    }
+    var isRunning: Bool {
+        guard !finished else { return false }
+        var status: Int32 = 0
+        let result = waitpid(processIdentifier, &status, WNOHANG)
+        if result == 0 || (result < 0 && errno == EINTR) { return true }
+        if result < 0 { return childAlive(processIdentifier) }
+        finished = true
+        terminationStatus = status & 0x7f == 0 ? (status >> 8) & 0xff : 128 + (status & 0x7f)
+        return false
+    }
+    func waitUntilExit() { while isRunning { Thread.sleep(forTimeInterval: 0.2) } }
+}
+func cleanupFinishedSession(_ cache: URL) throws -> String {
+    try rejectSymlinkAncestors(cache)
+    let lock = cache.appendingPathComponent("active.lock")
+    guard fm.fileExists(atPath: lock.path) else { return "There is no previous session to clean." }
+    guard canonical(lock) == lock else { throw fail("The session lock is a symlink. Preserve it for manual review.") }
+    let owner = try JSONSerialization.jsonObject(with: Data(contentsOf: lock.appendingPathComponent("owner.json"))) as? [String: Any]
+    guard let path = owner?["session"] as? String else { throw fail("The previous session receipt is missing. Preserve the cache for manual review.") }
+    let manifest = canonical(URL(fileURLWithPath: path)); let runs = canonical(cache.appendingPathComponent("runs"))
+    guard manifest.lastPathComponent == "session.json", manifest.deletingLastPathComponent().deletingLastPathComponent() == runs else { throw fail("The previous session receipt is outside this launcher's runs directory.") }
+    var receipt = try JSONSerialization.jsonObject(with: Data(contentsOf: manifest)) as? [String: Any] ?? [:]
+    let app = manifest.deletingLastPathComponent().appendingPathComponent("FL Studio 2026.app")
+    guard receipt["owned_app"] as? String == app.path,
+          receipt["run_directory"] as? String == manifest.deletingLastPathComponent().path else { throw fail("The previous receipt does not identify this exact private app. Preserve it for manual review.") }
+    // Any live PID is a refusal, including PID reuse. Never adopt or signal it.
+    for key in ["launcher_pid", "pid"] {
+        let value = key == "launcher_pid" ? owner?[key] : receipt[key]
+        if let pid = value as? Int32, pid != getpid(), childAlive(pid) { throw fail("A previous launcher or FL Studio PID is still alive. Quit that session normally before cleanup.") }
+    }
+    if fm.fileExists(atPath: app.path) {
+        guard canonical(app) == app else { throw fail("The previous app path is a symlink. Preserve it for manual review.") }
+        unregister(app); try fm.removeItem(at: app)
+    }
+    preserveHandler(receipt["original_flp_handler"] as? String)
+    receipt["flp_handler_preserved"] = handlerSnapshot() == receipt["original_flp_handler"] as? String
+    receipt["cleanup_pending"] = nil; receipt["status"] = "cleaned_after_exit"; try jsonWrite(receipt, manifest)
+    try fm.removeItem(at: lock.appendingPathComponent("owner.json")); try fm.removeItem(at: lock)
+    return "The exited session's private application copy was removed. Its diagnostics were kept."
+}
+final class Session {
+    let cache: URL; let helper: URL
+    var process: OwnedChild?
+    var changed: (String) -> Void = { _ in }
+    init(cache: URL, helper: URL) { self.cache = cache.standardizedFileURL; self.helper = canonical(helper) }
+    func launch(source: URL, project: URL?, testDevice: String? = nil) throws {
+        if let testDevice, testDevice != "ProToolsAudioBridge2A" { throw fail("Test mode permits only ProToolsAudioBridge2A.") }
+        try validateHelper(helper)
+        let existing = try command("/bin/ps", ["-axo", "comm="]).split(separator: "\n").contains { URL(fileURLWithPath: String($0).trimmingCharacters(in: .whitespaces)).lastPathComponent == "OsxFL" }
+        guard !existing else { throw fail("An FL Studio application is already running. Leave that session intact and quit it normally before launching the private copy.") }
+        let source = canonical(source)
+        var receipt = try inspect(source)
+        guard fm.fileExists(atPath: helper.path), !helper.path.contains(":") else { throw fail("The bundled native bridge is missing or its path contains a colon.") }
+        let helperHash = try digest(helper)
+        let normalData = try normalUserDataPath()
+        if let project { guard project.pathExtension == "flp", fm.fileExists(atPath: project.path) else { throw fail("Choose an existing, backed-up .flp project.") } }
+        try rejectSymlinkAncestors(cache)
+        try fm.createDirectory(at: cache, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let lock = cache.appendingPathComponent("active.lock")
+        guard Darwin.mkdir(lock.path, 0o700) == 0 else { throw fail("A launcher session is active, or needs cleanup. Quit its FL Studio copy normally, then choose Clean finished session.") }
+        let runID = UUID().uuidString.lowercased()
+        let run = cache.appendingPathComponent("runs/\(runID)")
+        do { try fm.createDirectory(at: run, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
+        catch { try? fm.removeItem(at: lock); throw error }
+        let app = run.appendingPathComponent("FL Studio 2026.app"), manifest = run.appendingPathComponent("session.json")
+        let log = run.appendingPathComponent("bridge.log")
+        let originalHandler = handlerSnapshot()
+        receipt.merge(["launcher_version": launcherVersion, "launcher_implementation": "native-swift", "launcher_pid": getpid(), "run_id": runID, "run_directory": run.path,
+                       "owned_app": app.path, "original_flp_handler": originalHandler as Any? ?? NSNull(), "normal_user_data_protected": normalData.path, "mode": testDevice == nil ? "normal" : "test", "project": project?.path as Any? ?? NSNull(), "helper_sha256": helperHash, "status": "preparing"]) { _, new in new }
+        var operationError: Error?
+        do {
+            try jsonWrite(receipt, manifest)
+            try jsonWrite(["launcher_pid": getpid(), "session": manifest.path], lock.appendingPathComponent("owner.json"))
+            let capacity = try fm.attributesOfFileSystem(forPath: run.path)[.systemFreeSize] as? NSNumber
+            guard (capacity?.uint64Value ?? 0) >= 5 * 1024 * 1024 * 1024 else { throw fail("At least 5 GiB free is required before preparing the private app copy.") }
+            changed("Verifying and preparing a private FL Studio copy…")
+            try command("/bin/cp", ["-cR", source.path, app.path])
+            let copy = try inspect(app)
+            for key in ["engine_sha256", "executable_sha256"] {
+                guard copy[key] as? String == receipt[key] as? String else { throw fail("Private copy failed verification.") }
+            }
+            unregister(app)
+            let home = run.appendingPathComponent("home"), tmp = run.appendingPathComponent("tmp")
+            let userData = run.appendingPathComponent("user-data")
+            try preparePrivateHome(home, tmp: tmp, userData: userData)
+            let (sandbox, trampoline) = try prepareSandbox(run, source: source, normalData: normalData)
+            var env = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("DYLD_") && !$0.key.hasPrefix("RYSUP_") && $0.key != "CFFIXED_USER_HOME" }
+            env.merge(["RYSUP_FLARA_HELPER_PATH": helper.path, "RYSUP_FLARA_HELPER_MANIFEST": helper.deletingLastPathComponent().appendingPathComponent("helper.json").path,
+                       "RYSUP_FLARA_SESSION_MANIFEST": manifest.path, "RYSUP_FLARA_EXPECTED_HELPER_SHA256": helperHash, "CFFIXED_USER_HOME": home.path, "TMPDIR": tmp.path,
+                       "RYSUP_FLARA_RUN_ID": runID, "RYSUP_FLARA_EXPECTED_EXE": app.appendingPathComponent(executablePath).path,
+                       "RYSUP_FLARA_EXPECTED_PARENT_PID": String(getpid()), "RYSUP_FLARA_RUN_DIR": run.path,
+                       "RYSUP_FLARA_SOURCE_APP": source.path, "RYSUP_FLARA_PROJECT_PATH": project?.path ?? "",
+                       "RYSUP_FLARA_MODE": testDevice == nil ? "normal" : "test"]) { _, new in new }
+            if let testDevice { env["RYSUP_FLARA_TEST_AUDIO_DEVICE_UID"] = testDevice }
+            let consoleURL = run.appendingPathComponent("console.log"); fm.createFile(atPath: consoleURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
+            let console = try FileHandle(forWritingTo: consoleURL); defer { try? console.close() }
+            let task = try OwnedChild(executable: URL(fileURLWithPath: "/usr/bin/sandbox-exec"),
+                                      arguments: ["-f", sandbox.path, "/bin/sh", trampoline.path] + (project.map { [$0.path] } ?? []), environment: env, directory: run, console: console)
+            process = task
+            receipt["pid"] = task.processIdentifier; receipt["process_group"] = getpgid(task.processIdentifier); receipt["status"] = "starting"; try jsonWrite(receipt, manifest)
+            let deadline = Date().addingTimeInterval(20)
+            var ready = false
+            while Date() < deadline {
+                let content = (try? String(contentsOf: log, encoding: .utf8)) ?? ""
+                if content.contains("bridge_refused") { throw fail("The bridge refused this process. See \(run.path).") }
+                if content.contains("bridge_ready") { ready = true; break }
+                guard task.isRunning else { throw fail("The private FL Studio copy exited before bridge startup. See \(run.path).") }
+                Thread.sleep(forTimeInterval: 0.2)
+            }
+            guard ready else { throw fail("Bridge startup was not confirmed. Any live FL Studio copy is preserved. See \(run.path).") }
+            receipt["status"] = "running"; try jsonWrite(receipt, manifest); unregister(app)
+            changed("ARA bridge ready. Use the visible FL Studio copy normally. Quit that copy when finished.\nDiagnostics: \(run.path)")
+            print("Private FL Studio PID \(task.processIdentifier). Diagnostics: \(run.path)")
+            while task.isRunning {
+                if receipt["ara_runtime_compatible"] as? Bool != false,
+                   let handle = try? FileHandle(forReadingFrom: log) {
+                    let size = (try? handle.seekToEnd()) ?? 0
+                    try? handle.seek(toOffset: size > 8192 ? size - 8192 : 0)
+                    let tail = String(decoding: (try? handle.readToEnd()) ?? Data(), as: UTF8.self)
+                    try? handle.close()
+                    if tail.contains("bridge_runtime_degraded") {
+                        receipt["ara_runtime_compatible"] = false
+                        receipt["runtime_warning"] = "ARA compatibility check failed; save your work, remove the affected insert and restart before further ARA editing. Live FL Studio is preserved."
+                        try jsonWrite(receipt, manifest)
+                        changed("ARA compatibility check failed. FL Studio remains open so you can save your work. Follow its compatibility alert, then restart before further ARA editing.\nDiagnostics: \(run.path)")
+                    }
+                }
+                Thread.sleep(forTimeInterval: 0.5)
+            }
+            receipt["status"] = "exited"; receipt["exit_code"] = task.terminationStatus
+        } catch {
+            operationError = error; receipt["status"] = "failed"; receipt["error"] = error.localizedDescription
+        }
+        // Preserve every live child; a startup PID is never permission to kill a user session.
+        let alive = process?.isRunning == true
+        if alive {
+            receipt["status"] = "detached"; receipt["cleanup_pending"] = "FL Studio is still running; private copy and lock preserved."
+        } else {
+            if fm.fileExists(atPath: app.path), canonical(app) == app {
+                unregister(app)
+                do { try fm.removeItem(at: app) } catch { receipt["cleanup_error"] = error.localizedDescription; operationError = error }
+            }
+            if receipt["cleanup_error"] == nil {
+                try? fm.removeItem(at: lock.appendingPathComponent("owner.json")); try? fm.removeItem(at: lock)
+            }
+        }
+        do {
+            let after = try inspect(source)
+            receipt["source_unchanged"] = ["engine_sha256", "executable_sha256"].allSatisfy { after[$0] as? String == receipt[$0] as? String }
+            if receipt["source_unchanged"] as? Bool != true { throw fail("Post-run source verification failed.") }
+        } catch { receipt["source_unchanged"] = false; receipt["source_verification_error"] = error.localizedDescription; operationError = error }
+        preserveHandler(originalHandler)
+        receipt["flp_handler_preserved"] = handlerSnapshot() == originalHandler
+        try jsonWrite(receipt, manifest)
+        if let operationError { throw operationError }
+        changed("FL Studio exited. Private copy removed and original installation verified unchanged.\nDiagnostics: \(run.path)")
+    }
+}
+func defaultCache() -> URL { fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/FLARALauncher") }
+func bundledHelper() -> URL { Bundle.main.resourceURL!.appendingPathComponent("native/FLAppBridge.dylib") }
+final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    var window: NSWindow!; var status: NSTextField!; var buttons: [NSButton] = []; var busy = false; var session: Session?
+    var source = URL(fileURLWithPath: "/Applications/FL Studio 2026.app")
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let menu = NSMenu(); let appItem = NSMenuItem(); menu.addItem(appItem)
+        let submenu = NSMenu(); submenu.addItem(withTitle: "Quit FL ARA Launcher", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"); appItem.submenu = submenu; NSApp.mainMenu = menu
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 380), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        window.title = "FL ARA Launcher"; window.delegate = self; window.center(); window.isReleasedWhenClosed = false
+        let stack = NSStackView(); stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 14; stack.translatesAutoresizingMaskIntoConstraints = false
+        let title = NSTextField(labelWithString: "Native ARA 2 • FL Studio 26.1.7.5421"); title.font = .boldSystemFont(ofSize: 20); stack.addArrangedSubview(title)
+        let intro = NSTextField(wrappingLabelWithString: "Experimental candidate. Launches an unchanged private copy of your licensed FL Studio. Use backed-up projects. Your installed FL Studio stays untouched. Third-party plug-in licenses are required."); stack.addArrangedSubview(intro)
+        for (label, action) in [("Launch FL Studio", #selector(launchEmpty)), ("Open a backed-up project…", #selector(openProject)), ("Check compatibility…", #selector(check)), ("Choose FL Studio application…", #selector(chooseFL)), ("Clean finished session", #selector(cleanup))] {
+            let button = NSButton(title: label, target: self, action: action); buttons.append(button); stack.addArrangedSubview(button)
+        }
+        status = NSTextField(wrappingLabelWithString: "Ready. Keep this launcher open while using its FL Studio copy."); status.font = .systemFont(ofSize: 12); stack.addArrangedSubview(status)
+        window.contentView!.addSubview(stack); NSLayoutConstraint.activate([stack.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor, constant: 24), stack.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor, constant: -24), stack.topAnchor.constraint(equalTo: window.contentView!.topAnchor, constant: 24)])
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
+    func alert(_ text: String) { let alert = NSAlert(); alert.messageText = "FL ARA Launcher"; alert.informativeText = text; alert.runModal() }
+    @objc func chooseFL() { let panel = NSOpenPanel(); panel.title = "Select your licensed FL Studio application"; panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowedContentTypes = [.applicationBundle]; if panel.runModal() == .OK, let url = panel.url { source = canonical(url); status.stringValue = "Selected: \(source.path)" } }
+    func work(_ block: @escaping () throws -> String) {
+        guard !busy else { return }; busy = true; buttons.forEach { $0.isEnabled = false }
+        DispatchQueue.global(qos: .userInitiated).async {
+            var message: String
+            do { message = try block() } catch { message = error.localizedDescription }
+            DispatchQueue.main.async { self.status.stringValue = message; self.busy = false; self.buttons.forEach { $0.isEnabled = true } }
+        }
+    }
+    @objc func check() { work { _ = try inspect(self.source); return "Compatible: FL Studio 26.1.7.5421, exact framework hashes and original vendor signature verified." } }
+    @objc func cleanup() { work { try cleanupFinishedSession(defaultCache()) } }
+    @objc func launchEmpty() { start(nil) }
+    @objc func openProject() {
+        let panel = NSOpenPanel(); panel.title = "Select a backed-up .flp project"; panel.canChooseDirectories = true; panel.canChooseFiles = true; panel.treatsFilePackagesAsDirectories = false
+        if panel.runModal() == .OK, let url = panel.url { guard url.pathExtension == "flp" else { alert("Select a .flp project."); return }; start(canonical(url)) }
+    }
+    func start(_ project: URL?) {
+        guard fm.fileExists(atPath: source.path) else { chooseFL(); return }
+        let session = Session(cache: defaultCache(), helper: bundledHelper()); self.session = session
+        session.changed = { [weak self] text in DispatchQueue.main.async { self?.status.stringValue = text } }
+        work { try session.launch(source: self.source, project: project); return self.statusText() }
+    }
+    func statusText() -> String { "FL Studio exited. Private copy removed and original installation verified unchanged. Diagnostics: \(defaultCache().path)." }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { NSApp.terminate(nil); return false }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if busy {
+            let alert = NSAlert(); alert.messageText = "Keep the launcher running?"; alert.informativeText = "Leaving now preserves any running FL Studio copy and its session lock. Quit that FL Studio copy normally, then use Clean finished session next time."; alert.addButton(withTitle: "Keep launcher running"); alert.addButton(withTitle: "Leave FL Studio open and quit launcher")
+            return alert.runModal() == .alertFirstButtonReturn ? .terminateCancel : .terminateNow
+        }
+        return .terminateNow
+    }
+}
+func selfTest() throws {
+    let base = fm.temporaryDirectory.appendingPathComponent("fl-ara-launcher-test-" + UUID().uuidString)
+    try fm.createDirectory(at: base, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+    defer { try? fm.removeItem(at: base) }
+    let home = base.appendingPathComponent("home"), tmp = base.appendingPathComponent("tmp"), data = base.appendingPathComponent("data")
+    try preparePrivateHome(home, tmp: tmp, userData: data)
+    let xml = try String(contentsOf: home.appendingPathComponent("Library/Preferences/Image-Line/reg.xml"), encoding: .utf8)
+    guard xml.contains(xmlEscape(data.path + "/")), !xml.contains("Registration"), !xml.contains("License") else { throw fail("Private registry test failed.") }
+    let link = base.appendingPathComponent("escape")
+    try fm.createSymbolicLink(at: link, withDestinationURL: base)
+    do { try rejectSymlinkAncestors(link.appendingPathComponent("nested")); throw fail("Symlink admitted.") }
+    catch let error as LaunchError { guard error.message.contains("symlinks") else { throw error } }
+    let source = base.appendingPathComponent("Fake FL.app")
+    try fm.createDirectory(at: source, withIntermediateDirectories: false)
+    let protectedFile = source.appendingPathComponent("test.txt")
+    try Data("original".utf8).write(to: protectedFile)
+    let (sandbox, trampoline) = try prepareSandbox(base, source: source, normalData: data)
+    let write = "printf changed > \"$1\""
+    do { _ = try command("/usr/bin/sandbox-exec", ["-f", sandbox.path, "/bin/sh", "-c", write, "test", protectedFile.path]); throw fail("Sandbox allowed original-app write.") }
+    catch let error as LaunchError { guard error.message.contains("sandbox-exec failed") else { throw error } }
+    guard try String(contentsOf: protectedFile, encoding: .utf8) == "original" else { throw fail("Sandbox preservation test failed.") }
+    let allowed = base.appendingPathComponent("allowed.txt")
+    _ = try command("/usr/bin/sandbox-exec", ["-f", sandbox.path, "/bin/sh", "-c", write, "test", allowed.path])
+    guard fm.fileExists(atPath: allowed.path), try String(contentsOf: trampoline, encoding: .utf8).contains("export DYLD_INSERT_LIBRARIES=\"$RYSUP_FLARA_HELPER_PATH\"") else { throw fail("Sandbox allowed-write or trampoline test failed.") }
+    print("PASS private home, minimal registry, no license duplication, symlink refusal, denied source write, allowed owned-run write, SIP-safe helper trampoline. No FL process launched.")
+}
+var args = Array(CommandLine.arguments.dropFirst())
+if args.isEmpty || args == ["--gui"] {
+    let app = NSApplication.shared; let delegate = LauncherDelegate(); app.delegate = delegate; app.setActivationPolicy(.regular)
+    withExtendedLifetime(delegate) { app.run() }
+} else {
+    do {
+        var source = URL(fileURLWithPath: "/Applications/FL Studio 2026.app"), project: URL?, cache = defaultCache(); var check = false, cleanup = false; var testDevice: String?
+        while !args.isEmpty {
+            let arg = args.removeFirst()
+            switch arg {
+            case "--test-device":
+                guard !args.isEmpty else { throw fail("--test-device requires a UID.") }; testDevice = args.removeFirst()
+            case "--self-test": try selfTest(); exit(0)
+            case "--version": print(launcherVersion); exit(0)
+            case "--check": check = true
+            case "--cleanup": cleanup = true
+            case "--fl", "--cache":
+                guard !args.isEmpty else { throw fail("\(arg) requires a path.") }; let path = URL(fileURLWithPath: args.removeFirst()); if arg == "--fl" { source = path } else { cache = path }
+            default: guard !arg.hasPrefix("-"), project == nil else { throw fail("Unknown argument: \(arg)") }; project = canonical(URL(fileURLWithPath: arg))
+            }
+        }
+        if check { let data = try JSONSerialization.data(withJSONObject: inspect(source), options: [.prettyPrinted, .sortedKeys]); print(String(decoding: data, as: UTF8.self)) }
+        else if cleanup { print(try cleanupFinishedSession(cache.standardizedFileURL)) }
+        else { try Session(cache: cache, helper: bundledHelper()).launch(source: source, project: project, testDevice: testDevice) }
+    } catch { fputs("FL ARA Launcher: \(error.localizedDescription)\n", stderr); exit(1) }
+}

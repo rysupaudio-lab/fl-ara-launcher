@@ -1,0 +1,38 @@
+"""Small public manifest: no source-machine paths, commands, credentials or audio."""
+import hashlib,re,subprocess
+from pathlib import Path
+FLAGS=('normal_app_integration_qualified','third_party_qualified','runtime_qualified')
+def valid_relative(path):
+    p=Path(path)
+    return bool(path) and not p.is_absolute() and '..' not in p.parts and '\\' not in path
+
+def sanitized_manifest(raw, helper, root):
+    actual=hashlib.sha256(helper.read_bytes()).hexdigest()
+    if raw.get('schema')!='rysup.fl-ara-helper/1' or raw.get('binary')!=helper.name or raw.get('runtime_ready') is not True:
+        raise ValueError('Helper admission is absent or unready')
+    result={'schema':raw['schema'],'binary':helper.name,'sha256':actual,'runtime_ready':True,
+            'runtime_admission_scope':raw.get('runtime_admission_scope','owned-qualification-candidate')}
+    if result['runtime_admission_scope'] not in {'bare-startup-test-only','owned-qualification-candidate','qualified-runtime'}:raise ValueError('Unrecognized runtime admission scope')
+    for name in FLAGS:result[name]=raw.get(name) is True
+    revision=raw.get('source_revision')
+    if revision is None:
+        revision=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()
+    if not isinstance(revision,str) or not re.fullmatch('[0-9a-f]{40}',revision):raise ValueError('Expected a complete source commit')
+    result['source_revision']=revision
+    hashes={}
+    if 'input_relative_hashes' in raw:
+        for name,seal in raw['input_relative_hashes'].items():
+            if not valid_relative(name) or not isinstance(seal,str) or not re.fullmatch('[0-9a-f]{64}',seal):raise ValueError('Invalid relative input seal')
+            hashes[name]=seal
+    else:
+        bridge=root/'native/bridge'
+        if bridge.is_dir():
+            for folder in ('host','native','legacy'):
+                for file in sorted((bridge/folder).iterdir()):
+                    if file.is_file() and not file.is_symlink() and file.suffix in {'.h','.hpp','.cpp','.mm','.py'}:
+                        hashes[str(file.relative_to(root))]=hashlib.sha256(file.read_bytes()).hexdigest()
+    result['input_relative_hashes']=hashes
+    # Public build profile is explicit and contains no arbitrary compile-manifest strings.
+    result['profile']={'architecture':'arm64','minimum_macos':'15.4','fl_version':'26.1.7.5421','initial_sample_rate':48000,
+                       'test_audio_device_uid':'Pro Tools Audio Bridge 2-A_UID','python_runtime_required':False}
+    return result

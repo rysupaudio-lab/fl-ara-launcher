@@ -2,6 +2,7 @@
 """Build native Swift launcher; no vendor binaries or third-party licenses bundled."""
 import argparse, hashlib, json, os, plistlib, shutil, subprocess
 from pathlib import Path
+from bundle_manifest import sanitized_manifest
 root = Path(__file__).resolve().parents[1]
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--output', type=Path, default=root / 'dist')
@@ -26,7 +27,10 @@ app = out / 'FL ARA Launcher.app'
 if app.exists(): shutil.rmtree(app)
 resources=app/'Contents/Resources'; native=resources/'native'; macos=app/'Contents/MacOS'
 native.mkdir(parents=True); macos.mkdir(parents=True)
-shutil.copy2(helper,native/'FLAppBridge.dylib'); shutil.copy2(a.helper_manifest,native/'helper.json')
+shutil.copy2(helper,native/'FLAppBridge.dylib')
+public_manifest=sanitized_manifest(manifest,native/'FLAppBridge.dylib',root)
+(native/'helper.json').write_text(json.dumps(public_manifest,indent=2)+'\n')
+(out/'app-build.json').write_text(json.dumps({'source_revision':public_manifest['source_revision'],'compiled_helper_sha256':digest,'public_manifest_sha256':hashlib.sha256((native/'helper.json').read_bytes()).hexdigest()},indent=2)+'\n')
 entry=macos/'FL ARA Launcher'
 subprocess.run(['xcrun','swiftc','-target','arm64-apple-macos15.4','-O','-module-cache-path',str(out/'.swift-module-cache'),str(root/'native/Launcher.swift'),'-o',str(entry)],check=True,env=build_env)
 with (app/'Contents/Info.plist').open('wb') as stream:

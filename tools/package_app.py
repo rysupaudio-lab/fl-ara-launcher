@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from bundle_manifest import sanitized_manifest
 
 root = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
@@ -40,7 +41,7 @@ manifest = json.loads(manifest_path.read_text())
 if manifest.get("schema") != "rysup.fl-ara-helper/1" or manifest.get("runtime_ready") is not True or manifest.get("binary") != helper.name or manifest.get("sha256") != hashlib.sha256(helper.read_bytes()).hexdigest():
     raise ValueError("Helper is not qualified for a runtime candidate")
 run(*sign, helper)
-manifest["sha256"] = hashlib.sha256(helper.read_bytes()).hexdigest()
+manifest = sanitized_manifest(manifest,helper,root)
 manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 run(*sign, app)
 run("/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", app)
@@ -88,7 +89,7 @@ with (app / "Contents/Info.plist").open("rb") as stream:
     app_info = plistlib.load(stream)
 files = [app / "Contents/MacOS" / app_info["CFBundleExecutable"], helper, zip_path, dmg_path]
 receipt = {"schema": "ara-launcher-package/1", "name": args.name, "version": args.version, "architecture": "arm64", "minimum_macos": app_info.get("LSMinimumSystemVersion"), "python_runtime_required": False, "runtime_admission_scope": manifest.get("runtime_admission_scope", "integration-candidate"), "normal_app_integration_qualified": manifest.get("normal_app_integration_qualified", False), "third_party_qualified": manifest.get("third_party_qualified", False),
-           "signed": bool(args.identity), "notarized": False, "published": False, "qualification": "pending normal-app and third-party runtime checks",
-           "files": [{"path": str(p), "bytes": p.stat().st_size, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p in files]}
+           "signed": True, "signature_kind": "developer-id" if args.identity else "ad-hoc", "developer_id_signed": bool(args.identity), "notarized": False, "published": False, "qualification": "pending normal-app and third-party runtime checks",
+           "files": [{"path": (str(p.relative_to(app)) if p.is_relative_to(app) else p.name), "bytes": p.stat().st_size, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p in files]}
 (out / f"{stem}.json").write_text(json.dumps(receipt, indent=2) + "\n")
 print(json.dumps(receipt, indent=2))

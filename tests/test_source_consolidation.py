@@ -14,7 +14,7 @@ class SourceFreeze(unittest.TestCase):
  def test_plan_does_not_copy_and_excludes_binaries(self):
   with tempfile.TemporaryDirectory() as folder:
    base=Path(folder);source,legacy=self.fixture(base);plan=stage.plan(source,legacy)
-   self.assertEqual(len(plan['files']),4);self.assertFalse((ROOT/'native/bridge').exists())
+   self.assertEqual(len(plan['files']),4);self.assertFalse((base/'package/native/bridge').exists())
    self.assertTrue(all(not row['destination'].endswith('.dylib') for row in plan['files']))
    self.assertEqual(sum(row['transform'] is not None for row in plan['files']),2)
  def test_changed_frozen_source_refuses_before_writes(self):

@@ -1,0 +1,253 @@
+{
+  "schema": "rysup.fl-ara-source-consolidation/1",
+  "upstream_source_freeze_sha256": "3f81b326cc9456dd4a0fd0ed4cca970a543a2d6a948e4be161ad28d345a04e3c",
+  "sdk_source_included": false,
+  "vendor_binary_or_audio_included": false,
+  "files": [
+    {
+      "destination": "host/FLStandaloneGraphDecoder.cpp",
+      "sha256": "171af49feae6d66ae14488cc19510ece15bcebdef96f7c316357719467d8a511",
+      "output_sha256": "171af49feae6d66ae14488cc19510ece15bcebdef96f7c316357719467d8a511",
+      "transform": null,
+      "bytes": 51054
+    },
+    {
+      "destination": "host/FLStandaloneGraphDecoder.h",
+      "sha256": "41003df09dc925a6d8406067d0f9acf7e5e8412633d2e517f843e6c99db89dad",
+      "output_sha256": "41003df09dc925a6d8406067d0f9acf7e5e8412633d2e517f843e6c99db89dad",
+      "transform": null,
+      "bytes": 6868
+    },
+    {
+      "destination": "host/FLStandaloneStateEnvelope.cpp",
+      "sha256": "e3848a6f6cea4c1367191259161d5b6878bfd5e9e6ce458c4097d2acd0a9372a",
+      "output_sha256": "e3848a6f6cea4c1367191259161d5b6878bfd5e9e6ce458c4097d2acd0a9372a",
+      "transform": null,
+      "bytes": 65763
+    },
+    {
+      "destination": "host/FLStandaloneStateEnvelope.h",
+      "sha256": "161d8d302bf493cfad84ce1dc59c907ba61eb7fbff488a87398c9366c25f6776",
+      "output_sha256": "161d8d302bf493cfad84ce1dc59c907ba61eb7fbff488a87398c9366c25f6776",
+      "transform": null,
+      "bytes": 4130
+    },
+    {
+      "destination": "host/GenericARAHost.cpp",
+      "sha256": "a0895e8d59e42995d9332b5a206b1e352f4c5c73d2b667cd720314ce24ef8efa",
+      "output_sha256": "a0895e8d59e42995d9332b5a206b1e352f4c5c73d2b667cd720314ce24ef8efa",
+      "transform": null,
+      "bytes": 58428
+    },
+    {
+      "destination": "host/GenericARAHost.h",
+      "sha256": "917113b0f88205f2c60b0079f45ac7bb4cc62aafe4e3ba522644e4f86c6ca47e",
+      "output_sha256": "917113b0f88205f2c60b0079f45ac7bb4cc62aafe4e3ba522644e4f86c6ca47e",
+      "transform": null,
+      "bytes": 14601
+    },
+    {
+      "destination": "host/OwnedVST3PlaybackCompanion.cpp",
+      "sha256": "8bbd7b952f61c10ce12b52cd0f32a91cbeeab83d43ded37fe1710948762a9ea5",
+      "output_sha256": "8bbd7b952f61c10ce12b52cd0f32a91cbeeab83d43ded37fe1710948762a9ea5",
+      "transform": null,
+      "bytes": 16965
+    },
+    {
+      "destination": "host/OwnedVST3PlaybackCompanion.h",
+      "sha256": "31c7e476740d622d021cfbdd0f944f82d917052abaa43b8e719a04904570d155",
+      "output_sha256": "31c7e476740d622d021cfbdd0f944f82d917052abaa43b8e719a04904570d155",
+      "transform": null,
+      "bytes": 2074
+    },
+    {
+      "destination": "host/StandaloneARACoordinator.cpp",
+      "sha256": "addb3eb0f294c6641379f87c57bb5d0d0299afda02970051146e5debc75283b1",
+      "output_sha256": "addb3eb0f294c6641379f87c57bb5d0d0299afda02970051146e5debc75283b1",
+      "transform": null,
+      "bytes": 34892
+    },
+    {
+      "destination": "host/StandaloneARACoordinator.h",
+      "sha256": "81a706099edb165315885c0a4039c624643f0a568322d2f3d416d90556ad8a3a",
+      "output_sha256": "81a706099edb165315885c0a4039c624643f0a568322d2f3d416d90556ad8a3a",
+      "transform": null,
+      "bytes": 13903
+    },
+    {
+      "destination": "host/StandaloneCacheGate.h",
+      "sha256": "c0521403b4ef1a00e455ec681d8773039640d9300a2af0d98d5c248ec3a76f25",
+      "output_sha256": "c0521403b4ef1a00e455ec681d8773039640d9300a2af0d98d5c248ec3a76f25",
+      "transform": null,
+      "bytes": 1701
+    },
+    {
+      "destination": "host/VST3ARAEntry.cpp",
+      "sha256": "e9c4fd95fec5cd36c7e5efb1a0f5014c5047e4c91817001087cff38f158485bc",
+      "output_sha256": "e9c4fd95fec5cd36c7e5efb1a0f5014c5047e4c91817001087cff38f158485bc",
+      "transform": null,
+      "bytes": 3882
+    },
+    {
+      "destination": "host/VST3ARAEntry.h",
+      "sha256": "01225911858c375e8b9d82b1544e9c1ee0d578832d33339df890382bdb50f305",
+      "output_sha256": "01225911858c375e8b9d82b1544e9c1ee0d578832d33339df890382bdb50f305",
+      "transform": null,
+      "bytes": 2332
+    },
+    {
+      "destination": "host/check_last_bind_freshness.cpp",
+      "sha256": "610ac9c78039893350e10834c44351f1d4b1d924fbb14390ba3acd5b9fe24125",
+      "output_sha256": "610ac9c78039893350e10834c44351f1d4b1d924fbb14390ba3acd5b9fe24125",
+      "transform": null,
+      "bytes": 3934
+    },
+    {
+      "destination": "host/check_standalone_host_contracts.py",
+      "sha256": "b4d9755b2652d99f610c7be8c4998d05d37fc9c8445477fa0b298d1a404fd7f4",
+      "output_sha256": "ea3b0570a08250c87140bf4fc7488a71389b91bc5e8e87eedb341e88cfcea861",
+      "transform": "repo-contract-env",
+      "bytes": 14110
+    },
+    {
+      "destination": "native/FLAppBridge.mm",
+      "sha256": "18e1206d265f15500b50de9f242787a3f06200a25b537c5f79ec04e1d0379fcb",
+      "output_sha256": "18e1206d265f15500b50de9f242787a3f06200a25b537c5f79ec04e1d0379fcb",
+      "transform": null,
+      "bytes": 62359
+    },
+    {
+      "destination": "native/FLNativeApplication.h",
+      "sha256": "e0a769c31122041f427eaa86dc87eacefcf843f44b94028bdad389588afca871",
+      "output_sha256": "e0a769c31122041f427eaa86dc87eacefcf843f44b94028bdad389588afca871",
+      "transform": null,
+      "bytes": 2254
+    },
+    {
+      "destination": "native/FLNativeApplication.mm",
+      "sha256": "3fc66e63a16c5675c709493ca33d8eaab26a9970ab273e29391264e56d4ccfd2",
+      "output_sha256": "3fc66e63a16c5675c709493ca33d8eaab26a9970ab273e29391264e56d4ccfd2",
+      "transform": null,
+      "bytes": 18365
+    },
+    {
+      "destination": "native/FLNativeMixBoundary.cpp",
+      "sha256": "f2b98cc24929ab3a545e7f34a2dba287049406ba6c72433dd54c00eaf8a95ceb",
+      "output_sha256": "f2b98cc24929ab3a545e7f34a2dba287049406ba6c72433dd54c00eaf8a95ceb",
+      "transform": null,
+      "bytes": 6526
+    },
+    {
+      "destination": "native/FLNativeMixBoundary.h",
+      "sha256": "3ecc8121d57eedff16b1f0e1d6b38dd6efd718a63a90cc06fd1717e8bb7c88e8",
+      "output_sha256": "3ecc8121d57eedff16b1f0e1d6b38dd6efd718a63a90cc06fd1717e8bb7c88e8",
+      "transform": null,
+      "bytes": 1564
+    },
+    {
+      "destination": "native/FLNativeMixBoundaryTests.cpp",
+      "sha256": "af1b6af251180789fae486c415a62f0070d41b4271868e8f61eb00ad260ad021",
+      "output_sha256": "af1b6af251180789fae486c415a62f0070d41b4271868e8f61eb00ad260ad021",
+      "transform": null,
+      "bytes": 1885
+    },
+    {
+      "destination": "native/FLNativeProcessObserver.cpp",
+      "sha256": "d7cc0a837fd0c6d02d263749e0f5e303a1f370593ee17571d033e516b0a9947d",
+      "output_sha256": "d7cc0a837fd0c6d02d263749e0f5e303a1f370593ee17571d033e516b0a9947d",
+      "transform": null,
+      "bytes": 9799
+    },
+    {
+      "destination": "native/FLNativeProcessObserver.h",
+      "sha256": "46b4a2810c9d096cefcc1457cf951faf74b100190beb06b772fa5426cc116caa",
+      "output_sha256": "46b4a2810c9d096cefcc1457cf951faf74b100190beb06b772fa5426cc116caa",
+      "transform": null,
+      "bytes": 3233
+    },
+    {
+      "destination": "native/FLNativeProcessObserverTests.cpp",
+      "sha256": "8413c5e62ff9eb2d4f0f34b74eb2addf4fa913f9c88f191f66644508e756cd85",
+      "output_sha256": "8413c5e62ff9eb2d4f0f34b74eb2addf4fa913f9c88f191f66644508e756cd85",
+      "transform": null,
+      "bytes": 8084
+    },
+    {
+      "destination": "native/FLNativeTransport.cpp",
+      "sha256": "312c549987294b1051767f20268ba83db9c13cd1cb9f9fe9dbe8dac38aefbdf1",
+      "output_sha256": "312c549987294b1051767f20268ba83db9c13cd1cb9f9fe9dbe8dac38aefbdf1",
+      "transform": null,
+      "bytes": 6642
+    },
+    {
+      "destination": "native/FLNativeTransport.h",
+      "sha256": "763eab4ef792146fbe839a7c32af40a0b6e67d624801f16cfd52f9b15952440a",
+      "output_sha256": "763eab4ef792146fbe839a7c32af40a0b6e67d624801f16cfd52f9b15952440a",
+      "transform": null,
+      "bytes": 2005
+    },
+    {
+      "destination": "native/FLStandaloneSourceOverlay.cpp",
+      "sha256": "c8c8cb8e178a8415a8303800c092bd52b7557137379731f826e9965a1f286aa9",
+      "output_sha256": "c8c8cb8e178a8415a8303800c092bd52b7557137379731f826e9965a1f286aa9",
+      "transform": null,
+      "bytes": 83266
+    },
+    {
+      "destination": "native/FLStandaloneSourceOverlay.h",
+      "sha256": "fddd7a16728fa063fd690e98915c62179f3c59f30d3d9b5e56a737b40f200e5e",
+      "output_sha256": "fddd7a16728fa063fd690e98915c62179f3c59f30d3d9b5e56a737b40f200e5e",
+      "transform": null,
+      "bytes": 7599
+    },
+    {
+      "destination": "native/FLVST3NativeHooks.cpp",
+      "sha256": "b092fcfabc88848541fb7eb5e165f9935fd8662e10d0b404c393ca0938acde82",
+      "output_sha256": "b092fcfabc88848541fb7eb5e165f9935fd8662e10d0b404c393ca0938acde82",
+      "transform": null,
+      "bytes": 52226
+    },
+    {
+      "destination": "native/FLVST3NativeHooks.h",
+      "sha256": "b6feb757033c2d4ee2f92f2f1a3698bb76540c5359a49ea8d189025b096d8bd9",
+      "output_sha256": "b6feb757033c2d4ee2f92f2f1a3698bb76540c5359a49ea8d189025b096d8bd9",
+      "transform": null,
+      "bytes": 14088
+    },
+    {
+      "destination": "native/RegistrationReadThrough.h",
+      "sha256": "a11c9ed22d4a31e0cabd1947f37786163ac9adf73702c294410e52660ad9421a",
+      "output_sha256": "a11c9ed22d4a31e0cabd1947f37786163ac9adf73702c294410e52660ad9421a",
+      "transform": null,
+      "bytes": 955
+    },
+    {
+      "destination": "native/RegistrationReadThrough.mm",
+      "sha256": "08096b2dc4071d92fbba0d18f11ae16fca72e789b16314d3ecba3bad067ddbfa",
+      "output_sha256": "08096b2dc4071d92fbba0d18f11ae16fca72e789b16314d3ecba3bad067ddbfa",
+      "transform": null,
+      "bytes": 20658
+    },
+    {
+      "destination": "native/build_helper.py",
+      "sha256": "da6afff81caa2702f2dc72d92adb77cf2679664360806bc9190816698fed6610",
+      "output_sha256": "da6afff81caa2702f2dc72d92adb77cf2679664360806bc9190816698fed6610",
+      "transform": null,
+      "bytes": 7437
+    },
+    {
+      "destination": "legacy/FLNativeModel.h",
+      "sha256": "a09cea7833361bc4639403db9eb0231b8ec4e019ff9253bc8df15e938b006203",
+      "output_sha256": "a09cea7833361bc4639403db9eb0231b8ec4e019ff9253bc8df15e938b006203",
+      "transform": null,
+      "bytes": 8681
+    },
+    {
+      "destination": "legacy/FLNativeModel.cpp",
+      "sha256": "daffc8dcac24bb02ed3200677f215eddd75bf873813e9b5c0d324924fb0fd5ba",
+      "output_sha256": "daffc8dcac24bb02ed3200677f215eddd75bf873813e9b5c0d324924fb0fd5ba",
+      "transform": null,
+      "bytes": 33697
+    }
+  ]
+}

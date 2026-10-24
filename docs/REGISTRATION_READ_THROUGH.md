@@ -1,6 +1,6 @@
 # Registration read-through — configuration routing only
 
-`native/bridge-support/RegistrationReadThrough.{h,mm}` provides a process-local,
+`native/bridge/native/RegistrationReadThrough.{h,mm}` provides a process-local,
 read-only view of the owner's existing `HKCU/Software/Image-Line/Registrations`
 subtree. It does not alter vendor registration validation or decide edition,
 version, eligibility, account state or lifetime updates. Missing/malformed source

@@ -91,3 +91,8 @@ Neither branch changes global preferences or duplicates the original registry.
 The launcher waits180seconds for exact-run/exact-PID `fl-ara-status.json`
 `runtime_helper_admitted` + `native_engine_ready`; a late live process is preserved.
 Build module caches and temporary files stay under the chosen `--output` directory.
+
+macOS native file-panel navigation history may be shared through the system panel
+service. DAW/audio registry isolation remains in place. Qualification tests capture
+and guard restoration of known changes they caused; they preserve independent
+user changes. FL-specific navigation keys have not yet been established.

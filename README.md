@@ -35,8 +35,9 @@ no Image-Line application files, third-party plugins, or license keys are shippe
   Any unbridged duplicate causes a visible error; no duplicate is adopted or stopped.
   Preserve every live process, copy and lock if the launcher exits or startup fails.
   Reopen the launcher and use **Clean finished session** after quitting that copy.
-- Snapshot/restore the `.flp` default handler and unregister private application
-  copies. Keep diagnostics under `~/Library/Caches/FLARALauncher/runs`.
+- Record baseline/current `.flp` handlers and unregister only an owned application
+  copy after every process using it exits. Never write a global default handler;
+  preserve and record changes made during the session. Keep diagnostics under `~/Library/Caches/FLARALauncher/runs`.
 
 A child-only `sandbox-exec` profile denies writes to the original FL application,
 Image-Line preference directory and existing preference domain files, configured

@@ -154,10 +154,20 @@ func handlerSnapshot() -> String? {
     guard let type = UTType(filenameExtension: "flp") else { return nil }
     return LSCopyDefaultRoleHandlerForContentType(type.identifier as CFString, LSRolesMask.all)?.takeRetainedValue() as String?
 }
-func preserveHandler(_ original: String?) {
-    guard let original, handlerSnapshot() != original, let type = UTType(filenameExtension: "flp") else { return }
-    LSSetDefaultRoleHandlerForContentType(type.identifier as CFString, LSRolesMask.all, original as CFString)
+struct HandlerDecision {
+    let original: String?; let current: String?
+    var externalChange: Bool { original != current }
+    // Private FL copies retain the vendor bundle ID. A different selected
+    // bundle ID is never authority for this launcher to overwrite user choice.
+    var defaultWriteAuthorized: Bool { false }
+    var receipt: [String: Any] {
+        ["original_flp_handler": original as Any? ?? NSNull(), "current_flp_handler": current as Any? ?? NSNull(),
+         "external_handler_change": externalChange, "default_handler_write_performed": false,
+         "flp_handler_observation_available": original != nil && current != nil,
+         "flp_handler_preserved": original != nil && current != nil ? !externalChange as Any : NSNull()]
+    }
 }
+func handlerDecision(original: String?, current: String?) -> HandlerDecision { HandlerDecision(original: original, current: current) }
 // Enumerate exact executable paths, including unbridged duplicates created by
 // LaunchServices or another UI tool. Never signal or adopt any of these PIDs.
 func liveExactProcesses(_ executable: URL) throws -> [Int32] {
@@ -274,8 +284,7 @@ func cleanupFinishedSession(_ cache: URL) throws -> String {
         guard canonical(app) == app else { throw fail("The previous app path is a symlink. Preserve it for manual review.") }
         unregister(app); try fm.removeItem(at: app)
     }
-    preserveHandler(receipt["original_flp_handler"] as? String)
-    receipt["flp_handler_preserved"] = handlerSnapshot() == receipt["original_flp_handler"] as? String
+    receipt.merge(handlerDecision(original: receipt["original_flp_handler"] as? String, current: handlerSnapshot()).receipt) { _, new in new }
     receipt["cleanup_pending"] = nil; receipt["status"] = "cleaned_after_exit"; try jsonWrite(receipt, manifest)
     try fm.removeItem(at: lock.appendingPathComponent("owner.json")); try fm.removeItem(at: lock)
     return "The exited session's private application copy was removed. Its diagnostics were kept."
@@ -322,7 +331,6 @@ final class Session {
             for key in ["engine_sha256", "executable_sha256"] {
                 guard copy[key] as? String == receipt[key] as? String else { throw fail("Private copy failed verification.") }
             }
-            unregister(app)
             let home = run.appendingPathComponent("home"), tmp = run.appendingPathComponent("tmp")
             let userData = run.appendingPathComponent("user-data")
             try preparePrivateHome(home, tmp: tmp, userData: userData, testDevice: testDevice)
@@ -356,7 +364,7 @@ final class Session {
                 Thread.sleep(forTimeInterval: 0.2)
             }
             guard ready else { throw fail("Bridge startup was not confirmed. Any live FL Studio copy is preserved. See \(run.path).") }
-            receipt["status"] = "running"; try jsonWrite(receipt, manifest); unregister(app)
+            receipt["status"] = "running"; try jsonWrite(receipt, manifest)
             changed("Native FL engine ready. Experimental ARA compatibility still requires qualification. Quit this private copy when finished.\nDiagnostics: \(run.path)")
             print("Private FL Studio PID \(task.processIdentifier). Diagnostics: \(run.path)")
             while task.isRunning {
@@ -402,8 +410,7 @@ final class Session {
             receipt["source_unchanged"] = ["engine_sha256", "executable_sha256"].allSatisfy { after[$0] as? String == receipt[$0] as? String }
             if receipt["source_unchanged"] as? Bool != true { throw fail("Post-run source verification failed.") }
         } catch { receipt["source_unchanged"] = false; receipt["source_verification_error"] = error.localizedDescription; operationError = error }
-        preserveHandler(originalHandler)
-        receipt["flp_handler_preserved"] = handlerSnapshot() == originalHandler
+        receipt.merge(handlerDecision(original: originalHandler, current: handlerSnapshot()).receipt) { _, new in new }
         try jsonWrite(receipt, manifest)
         if let operationError { throw operationError }
         changed("FL Studio exited. Private copy removed and original installation verified unchanged.\nDiagnostics: \(run.path)")
@@ -499,7 +506,16 @@ func selfTest() throws {
     let allowed = base.appendingPathComponent("allowed.txt")
     _ = try command("/usr/bin/sandbox-exec", ["-f", sandbox.path, "/bin/sh", "-c", write, "test", allowed.path])
     guard fm.fileExists(atPath: allowed.path), try String(contentsOf: trampoline, encoding: .utf8).contains("export DYLD_INSERT_LIBRARIES=\"$RYSUP_FLARA_HELPER_PATH\"") else { throw fail("Sandbox allowed-write or trampoline test failed.") }
-    print("PASS private home; normal48k+test-only native device registry; exact process inventory; no license duplication; symlink refusal; denied source write; allowed owned-run write; SIP-safe helper trampoline. No FL process launched.")
+    let vendor = "com.image-line.flstudio"
+    let unchanged = handlerDecision(original: vendor, current: vendor)
+    let userChanged = handlerDecision(original: vendor, current: "com.user.chosen-editor")
+    let notOurs = handlerDecision(original: "com.user.chosen-editor", current: "com.another.editor")
+    let unknown = handlerDecision(original: nil, current: nil)
+    guard !unchanged.externalChange, userChanged.externalChange, notOurs.externalChange,
+          ![unchanged,userChanged,notOurs,unknown].contains(where: { $0.defaultWriteAuthorized }) else {
+        throw fail("Default-handler preservation decision authorized a write or misclassified a user choice.")
+    }
+    print("PASS private home; normal48k+test-only native device registry; exact process inventory; no license duplication; symlink refusal; denied source write; allowed owned-run write; SIP-safe helper trampoline; read-only default-handler decisions. No FL process launched.")
 }
 var args = Array(CommandLine.arguments.dropFirst())
 if args.isEmpty || args == ["--gui"] {

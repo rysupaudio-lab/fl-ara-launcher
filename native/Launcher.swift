@@ -225,9 +225,38 @@ func copyPrivateApp(_ source: URL, to destination: URL, cache: URL) throws -> St
     guard try freeBytes(cache) >= reserve else { throw fail("Private app copy breached the free-space reserve.") }
     return "explicit_razer_full_copy"
 }
+enum SessionCleanupDecision: String {
+    case removeExitedCopy, preserveLiveChild, preserveExactPrivateProcesses, preserveUnknownProcessInventory
+}
+func sessionCleanupDecision(childRunning: Bool, exactPrivatePIDs: [Int32]?) -> SessionCleanupDecision {
+    if childRunning { return .preserveLiveChild }
+    guard let exactPrivatePIDs else { return .preserveUnknownProcessInventory }
+    return exactPrivatePIDs.isEmpty ? .removeExitedCopy : .preserveExactPrivateProcesses
+}
+func startupExitMessage(_ code: Int32?, diagnostics: URL) -> String {
+    if code == 78 { return "The private FL copy refused startup (exit 78). See diagnostics: \(diagnostics.path)" }
+    if let code { return "The private FL copy exited before startup was confirmed (exit \(code)). See diagnostics: \(diagnostics.path)" }
+    return "The private FL copy exited before startup was confirmed; its exit status was not observed. See diagnostics: \(diagnostics.path)"
+}
+func ownedStartupRefusalEvent(log: URL, runID: String, pid: Int32) -> String? {
+    guard let handle = try? FileHandle(forReadingFrom: log) else { return nil }
+    defer { try? handle.close() }
+    let size = (try? handle.seekToEnd()) ?? 0
+    try? handle.seek(toOffset: size > 65536 ? size - 65536 : 0)
+    let text = String(decoding: (try? handle.readToEnd()) ?? Data(), as: UTF8.self)
+    let admitted = Set(["owned_startup_save_guard_refused", "owned_startup_engine_identity_refused"])
+    for line in text.split(separator: "\n").reversed() {
+        guard let row = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
+              row["run_id"] as? String == runID, row["pid"] as? Int32 == pid,
+              let event = row["event"] as? String, admitted.contains(event) else { continue }
+        return event
+    }
+    return nil
+}
 final class OwnedChild {
     private(set) var processIdentifier: Int32 = 0
     private(set) var terminationStatus: Int32 = 0
+    private(set) var exitStatusObserved = false
     private var finished = false
     init(executable: URL, arguments: [String], environment: [String: String], directory: URL, console: FileHandle) throws {
         var actions: posix_spawn_file_actions_t?; var attributes: posix_spawnattr_t?
@@ -254,7 +283,7 @@ final class OwnedChild {
         let result = waitpid(processIdentifier, &status, WNOHANG)
         if result == 0 || (result < 0 && errno == EINTR) { return true }
         if result < 0 { return childAlive(processIdentifier) }
-        finished = true
+        finished = true; exitStatusObserved = true
         terminationStatus = status & 0x7f == 0 ? (status >> 8) & 0xff : 128 + (status & 0x7f)
         return false
     }
@@ -322,6 +351,7 @@ final class Session {
         receipt.merge(["launcher_version": launcherVersion, "launcher_implementation": "native-swift", "launcher_pid": getpid(), "run_id": runID, "run_directory": run.path,
                        "owned_app": app.path, "original_flp_handler": originalHandler as Any? ?? NSNull(), "normal_user_data_protected": normalData.path, "mode": testDevice == nil ? "normal" : "test", "project": project?.path as Any? ?? NSNull(), "helper_sha256": helperHash, "status": "preparing"]) { _, new in new }
         var operationError: Error?
+        var nativeStartupConfirmed = false
         do {
             try jsonWrite(receipt, manifest)
             try jsonWrite(["launcher_pid": getpid(), "session": manifest.path], lock.appendingPathComponent("owner.json"))
@@ -360,10 +390,11 @@ final class Session {
                     if let error = status["error"] as? String, !error.isEmpty { throw fail("Native FL bridge refused: \(error). See \(run.path).") }
                     if status["runtime_helper_admitted"] as? Bool == true, status["native_engine_ready"] as? Bool == true { ready = true; break }
                 }
-                guard task.isRunning else { throw fail("The private FL Studio copy exited before bridge startup. See \(run.path).") }
+                guard task.isRunning else { throw fail(startupExitMessage(task.exitStatusObserved ? task.terminationStatus : nil, diagnostics: run)) }
                 Thread.sleep(forTimeInterval: 0.2)
             }
             guard ready else { throw fail("Bridge startup was not confirmed. Any live FL Studio copy is preserved. See \(run.path).") }
+            nativeStartupConfirmed = true
             receipt["status"] = "running"; try jsonWrite(receipt, manifest)
             changed("Native FL engine ready. Experimental ARA compatibility still requires qualification. Quit this private copy when finished.\nDiagnostics: \(run.path)")
             print("Private FL Studio PID \(task.processIdentifier). Diagnostics: \(run.path)")
@@ -385,13 +416,26 @@ final class Session {
                 }
                 Thread.sleep(forTimeInterval: 0.5)
             }
-            receipt["status"] = "exited"; receipt["exit_code"] = task.terminationStatus
+            receipt["status"] = "exited"
         } catch {
             operationError = error; receipt["status"] = "failed"; receipt["error"] = error.localizedDescription
         }
         // Preserve every live child; a startup PID is never permission to kill a user session.
         let remaining = try? liveExactProcesses(app.appendingPathComponent(executablePath))
-        let alive = process?.isRunning == true || remaining == nil || !(remaining?.isEmpty ?? true)
+        let childRunning = process?.isRunning == true
+        let cleanup = sessionCleanupDecision(childRunning: childRunning, exactPrivatePIDs: remaining)
+        receipt["cleanup_decision"] = cleanup.rawValue
+        if let task = process, !childRunning {
+            receipt["exit_status_observed"] = task.exitStatusObserved
+            receipt["exit_code"] = task.exitStatusObserved ? task.terminationStatus as Any : NSNull()
+            if !nativeStartupConfirmed, task.exitStatusObserved, task.terminationStatus == 78 {
+                receipt["status"] = "startup_refused"; receipt["startup_refused"] = true
+                receipt["ara_capability_verdict"] = "not_established"
+                receipt["startup_refusal_event"] = ownedStartupRefusalEvent(log: log, runID: runID, pid: task.processIdentifier) as Any? ?? NSNull()
+                operationError = fail(startupExitMessage(78, diagnostics: run))
+            }
+        }
+        let alive = cleanup != .removeExitedCopy
         receipt["remaining_private_pids"] = remaining as Any? ?? NSNull()
         if alive {
             receipt["status"] = "detached"; receipt["cleanup_pending"] = "At least one exact private executable is alive, or the inventory failed; copy and lock preserved."
@@ -506,6 +550,30 @@ func selfTest() throws {
     let allowed = base.appendingPathComponent("allowed.txt")
     _ = try command("/usr/bin/sandbox-exec", ["-f", sandbox.path, "/bin/sh", "-c", write, "test", allowed.path])
     guard fm.fileExists(atPath: allowed.path), try String(contentsOf: trampoline, encoding: .utf8).contains("export DYLD_INSERT_LIBRARIES=\"$RYSUP_FLARA_HELPER_PATH\"") else { throw fail("Sandbox allowed-write or trampoline test failed.") }
+    // Exercise an actual owned child/refusal status, without loading FL or a
+    // plugin. Unknown/duplicate inventory must never authorize copy removal.
+    let consoleURL = base.appendingPathComponent("exit78.log")
+    fm.createFile(atPath: consoleURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
+    let console = try FileHandle(forWritingTo: consoleURL); defer { try? console.close() }
+    let child = try OwnedChild(executable: URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "exit 78"],
+                               environment: ["PATH": "/usr/bin:/bin", "HOME": base.path, "CFFIXED_USER_HOME": base.path, "TMPDIR": base.path], directory: base, console: console)
+    child.waitUntilExit()
+    guard child.exitStatusObserved, child.terminationStatus == 78,
+          startupExitMessage(78, diagnostics: base).contains("refused startup"),
+          !startupExitMessage(1, diagnostics: base).contains("refused startup"),
+          sessionCleanupDecision(childRunning: true, exactPrivatePIDs: []) == .preserveLiveChild,
+          sessionCleanupDecision(childRunning: false, exactPrivatePIDs: [12345]) == .preserveExactPrivateProcesses,
+          sessionCleanupDecision(childRunning: false, exactPrivatePIDs: nil) == .preserveUnknownProcessInventory,
+          sessionCleanupDecision(childRunning: false, exactPrivatePIDs: []) == .removeExitedCopy else {
+        throw fail("Owned exit-78 observation or cleanup-preservation decision failed.")
+    }
+    let events = base.appendingPathComponent("events.jsonl")
+    try Data(("{\"event\":\"owned_startup_save_guard_refused\",\"run_id\":\"another-run\",\"pid\":123}\n" +
+              "{\"event\":\"owned_startup_engine_identity_refused\",\"run_id\":\"test-run\",\"pid\":456}\n").utf8).write(to: events)
+    guard ownedStartupRefusalEvent(log: events, runID: "test-run", pid: 456) == "owned_startup_engine_identity_refused",
+          ownedStartupRefusalEvent(log: events, runID: "test-run", pid: 123) == nil else {
+        throw fail("Startup refusal event admitted another run or process.")
+    }
     let vendor = "com.image-line.flstudio"
     let unchanged = handlerDecision(original: vendor, current: vendor)
     let userChanged = handlerDecision(original: vendor, current: "com.user.chosen-editor")
@@ -515,7 +583,7 @@ func selfTest() throws {
           ![unchanged,userChanged,notOurs,unknown].contains(where: { $0.defaultWriteAuthorized }) else {
         throw fail("Default-handler preservation decision authorized a write or misclassified a user choice.")
     }
-    print("PASS private home; normal48k+test-only native device registry; exact process inventory; no license duplication; symlink refusal; denied source write; allowed owned-run write; SIP-safe helper trampoline; read-only default-handler decisions. No FL process launched.")
+    print("PASS private home; normal48k+test-only native device registry; exact process inventory; no license duplication; symlink refusal; denied source write; allowed owned-run write; SIP-safe helper trampoline; read-only default-handler decisions; actual owned exit78 and conservative cleanup controls. No FL process launched.")
 }
 var args = Array(CommandLine.arguments.dropFirst())
 if args.isEmpty || args == ["--gui"] {

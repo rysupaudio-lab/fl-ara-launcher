@@ -15,20 +15,25 @@ no Image-Line application files, third-party plugins, or license keys are shippe
   N68WEP5ZZZ signature, before and after each session.
 - Refuse while another OsxFL application is running. Never attach, hide, adopt,
   signal, or terminate a pre-existing/user FL instance.
-- Make a signature-preserving APFS clone under an owned cache run UUID. Fail if
-  cloning fails. Launch its executable directly with `posix_spawn`, never `open`.
+- Make a signature-preserving APFS clone under an owned cache run UUID. Cross-volume
+  full copying is allowed only on the explicitly selected mounted Razer SSD after
+  non-symlink-following source sizing proves the whole copy plus 5 GiB reserve fits.
+  There is no automatic internal-disk full-copy fallback. Launch its executable directly with `posix_spawn`, never `open`.
 - Keep all private home/preferences/user data paths within that owned run, reject
   symlink ancestors, and synthesize only the private Shared data registry setting.
   Do not copy the user's registry, license, or whole home. The integration helper
   must preserve legitimate read-only authorization without duplicating secrets.
 - Bind helper admission to exact executable, parent PID, run UUID and directory.
-  Test mode admits only the `ProToolsAudioBridge2A` audio-device UID. Normal mode
+  Test mode admits only the `Pro Tools Audio Bridge 2-A_UID` audio-device UID. Normal mode
   allows the user's chosen normal audio device.
-- Select only an existing backed-up `.flp` project. Native project-open argv is
-  awaiting the standalone-entry owner's qualification. Do not assert this route
-  qualified on the basis of compilation.
-- Remove only this exact application copy after its child is confirmed exited.
-  Preserve a live process, copy and lock if the launcher exits or startup fails.
+- Select only an existing backed-up `.flp` project, passed as one absolute path
+  argument. Current-engine static parser proof is recorded in the integration
+  `fl/PROJECT_ARGUMENT.md`; no `--` or `--args` separator is added. Runtime opening
+  must still be confirmed through the actual current native project and graph.
+- Remove only this exact application copy after its child and every live process
+  whose executable path equals the private executable are confirmed exited.
+  Any unbridged duplicate causes a visible error; no duplicate is adopted or stopped.
+  Preserve every live process, copy and lock if the launcher exits or startup fails.
   Reopen the launcher and use **Clean finished session** after quitting that copy.
 - Snapshot/restore the `.flp` default handler and unregister private application
   copies. Keep diagnostics under `~/Library/Caches/FLARALauncher/runs`.
@@ -73,5 +78,15 @@ public distribution are separate recorded states. This source currently provides
 no finished installable package; the native helper remains integration-owned.
 
 CLI: `--version`, `--check`, `--fl PATH`, `--cache PATH`, `--cleanup`,
-`--test-device ProToolsAudioBridge2A`, or one backed-up `.flp` path. No hidden
+`--test-device "Pro Tools Audio Bridge 2-A_UID"`, or one backed-up `.flp` path. No hidden
 runtime automation is activated by the offline checks.
+
+Use `--cache-root "/Volumes/Razer SSD/.../FLARALauncher"` or the absolute
+`RYSUP_FLARA_CACHE_ROOT` environment variable to select an external cache. The
+private normal-app registry seeds FL Studio26/Devices/Audio output Sample rate
+(Type2) at48000. Only test mode adds Device name (Type2)
+`4Pro Tools Audio Bridge 2-A`; normal mode leaves the user's device unspecified.
+Neither branch changes global preferences or duplicates the original registry.
+The launcher waits180seconds for exact-run/exact-PID `fl-ara-status.json`
+`runtime_helper_admitted` + `native_engine_ready`; a late live process is preserved.
+Build module caches and temporary files stay under the chosen `--output` directory.

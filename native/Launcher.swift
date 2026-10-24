@@ -67,14 +67,16 @@ func rejectSymlinkAncestors(_ url: URL) throws {
     }
 }
 func xmlEscape(_ value: String) -> String { value.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;") }
-func preparePrivateHome(_ home: URL, tmp: URL, userData: URL) throws {
+func preparePrivateHome(_ home: URL, tmp: URL, userData: URL, testDevice: String? = nil) throws {
     for folder in [home, tmp, userData, home.appendingPathComponent("Library/Preferences/Image-Line"), home.appendingPathComponent("Library/Application Support"), home.appendingPathComponent("Documents"), home.appendingPathComponent("Desktop")] {
         try rejectSymlinkAncestors(folder)
         try fm.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     }
     // Deliberately synthesize only path settings. Never read or duplicate license keys,
     // the original Image-Line registry, whole home folders or write-through symlinks.
-    let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><XMLReg><Key Name=\"Key1\"><Key Name=\"HKEY_CURRENT_USER\"><Key Name=\"Software\"><Key Name=\"Image-Line\"><Key Name=\"Shared\"><Key Name=\"Paths\"><Value Name=\"Shared data\" Type=\"2\">\(xmlEscape(userData.path + "/"))</Value></Key></Key></Key></Key></Key></Key></XMLReg>"
+    let device = testDevice == nil ? "" : "<Value Name=\"Device name\" Type=\"2\">4Pro Tools Audio Bridge 2-A</Value>"
+    let audio = "<Key Name=\"FL Studio 26\"><Key Name=\"Devices\"><Key Name=\"Audio output\"><Value Name=\"Sample rate\" Type=\"2\">48000</Value>\(device)</Key></Key></Key>"
+    let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><XMLReg><Key Name=\"Key1\"><Key Name=\"HKEY_CURRENT_USER\"><Key Name=\"Software\"><Key Name=\"Image-Line\"><Key Name=\"Shared\"><Key Name=\"Paths\"><Value Name=\"Shared data\" Type=\"2\">\(xmlEscape(userData.path + "/"))</Value></Key></Key>\(audio)</Key></Key></Key></Key></XMLReg>"
     let registry = home.appendingPathComponent("Library/Preferences/Image-Line/reg.xml")
     try Data(xml.utf8).write(to: registry, options: .atomic)
     try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: registry.path)
@@ -155,6 +157,63 @@ func preserveHandler(_ original: String?) {
     guard let original, handlerSnapshot() != original, let type = UTType(filenameExtension: "flp") else { return }
     LSSetDefaultRoleHandlerForContentType(type.identifier as CFString, LSRolesMask.all, original as CFString)
 }
+// Enumerate exact executable paths, including unbridged duplicates created by
+// LaunchServices or another UI tool. Never signal or adopt any of these PIDs.
+func liveExactProcesses(_ executable: URL) throws -> [Int32] {
+    guard let handle = dlopen("/usr/lib/libproc.dylib", RTLD_NOW | RTLD_LOCAL) else { throw fail("Cannot verify all processes before cleanup; preserve this app copy.") }
+    defer { dlclose(handle) }
+    typealias List = @convention(c) (UnsafeMutableRawPointer?, Int32) -> Int32
+    typealias Path = @convention(c) (Int32, UnsafeMutableRawPointer?, UInt32) -> Int32
+    guard let ls = dlsym(handle, "proc_listallpids"), let ps = dlsym(handle, "proc_pidpath") else { throw fail("Process inventory is unavailable; preserve this app copy.") }
+    let list = unsafeBitCast(ls, to: List.self), path = unsafeBitCast(ps, to: Path.self)
+    let needed = list(nil, 0)
+    guard needed > 0 else { throw fail("Process inventory failed; preserve this app copy.") }
+    var pids = [Int32](repeating: 0, count: Int(needed) + 1024)
+    let count = pids.withUnsafeMutableBytes { list($0.baseAddress, Int32($0.count)) }
+    guard count >= 0, count < pids.count else { throw fail("Process inventory changed too quickly; preserve this app copy.") }
+    let expected = physicalPath(executable)
+    var matches: [Int32] = []
+    for pid in pids.prefix(Int(count)) where pid > 0 {
+        var bytes = [CChar](repeating: 0, count: 4096)
+        let length = bytes.withUnsafeMutableBytes { path(pid, $0.baseAddress, UInt32($0.count)) }
+        if length > 0, String(cString: bytes) == expected { matches.append(pid) }
+    }
+    return matches.sorted()
+}
+func sourceLogicalBytes(_ source: URL) throws -> UInt64 {
+    var traversalError: Error?
+    guard let entries = fm.enumerator(at: source, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey], options: [], errorHandler: { _, error in traversalError = error; return false }) else { throw fail("Cannot size the selected FL application safely.") }
+    var bytes: UInt64 = 0
+    for case let file as URL in entries {
+        let values = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
+        if values.isSymbolicLink == true { entries.skipDescendants(); continue }
+        if values.isRegularFile == true { bytes += UInt64(values.fileSize ?? 0) }
+    }
+    if let traversalError { throw traversalError }
+    return bytes
+}
+func freeBytes(_ directory: URL) throws -> UInt64 { (try fm.attributesOfFileSystem(forPath: directory.path)[.systemFreeSize] as? NSNumber)?.uint64Value ?? 0 }
+func copyPrivateApp(_ source: URL, to destination: URL, cache: URL) throws -> String {
+    let reserve: UInt64 = 5 * 1024 * 1024 * 1024
+    let fromFS = try fm.attributesOfFileSystem(forPath: source.path)[.systemNumber] as? NSNumber
+    let toFS = try fm.attributesOfFileSystem(forPath: cache.path)[.systemNumber] as? NSNumber
+    guard try freeBytes(cache) >= reserve else { throw fail("At least 5 GiB free is required before preparing the private app copy.") }
+    if fromFS != nil, fromFS == toFS {
+        do { try command("/bin/cp", ["-cR", source.path, destination.path]); return "apfs_clone" }
+        catch {
+            guard try liveExactProcesses(destination.appendingPathComponent(executablePath)).isEmpty else { throw fail("A live private process prevents partial-copy cleanup.") }
+            if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
+        }
+    }
+    // A full fallback is allowed only on the owner's explicitly selected real
+    // Razer mount. Never silently fill the internal disk with a full app copy.
+    guard cache.path.hasPrefix("/Volumes/Razer SSD/"), fm.fileExists(atPath: "/Volumes/Razer SSD"), fromFS != toFS else { throw fail("APFS cloning failed or crosses volumes. Select --cache-root on the mounted Razer SSD; no internal full-copy fallback is allowed.") }
+    let logical = try sourceLogicalBytes(source)
+    guard try freeBytes(cache) >= logical + reserve else { throw fail("The external destination needs the entire app size plus a 5 GiB reserve.") }
+    try command("/usr/bin/ditto", ["--rsrc", "--extattr", "--acl", source.path, destination.path])
+    guard try freeBytes(cache) >= reserve else { throw fail("Private app copy breached the free-space reserve.") }
+    return "explicit_razer_full_copy"
+}
 final class OwnedChild {
     private(set) var processIdentifier: Int32 = 0
     private(set) var terminationStatus: Int32 = 0
@@ -208,6 +267,8 @@ func cleanupFinishedSession(_ cache: URL) throws -> String {
         let value = key == "launcher_pid" ? owner?[key] : receipt[key]
         if let pid = value as? Int32, pid != getpid(), childAlive(pid) { throw fail("A previous launcher or FL Studio PID is still alive. Quit that session normally before cleanup.") }
     }
+    let remaining = try liveExactProcesses(app.appendingPathComponent(executablePath))
+    guard remaining.isEmpty else { throw fail("Private FL executables are still running (PIDs \(remaining)); preserve the app and lock until every copy exits normally.") }
     if fm.fileExists(atPath: app.path) {
         guard canonical(app) == app else { throw fail("The previous app path is a symlink. Preserve it for manual review.") }
         unregister(app); try fm.removeItem(at: app)
@@ -224,7 +285,7 @@ final class Session {
     var changed: (String) -> Void = { _ in }
     init(cache: URL, helper: URL) { self.cache = cache.standardizedFileURL; self.helper = canonical(helper) }
     func launch(source: URL, project: URL?, testDevice: String? = nil) throws {
-        if let testDevice, testDevice != "ProToolsAudioBridge2A" { throw fail("Test mode permits only ProToolsAudioBridge2A.") }
+        if let testDevice, testDevice != "Pro Tools Audio Bridge 2-A_UID" { throw fail("Test mode permits only Pro Tools Audio Bridge 2-A_UID.") }
         try validateHelper(helper)
         let existing = try command("/bin/ps", ["-axo", "comm="]).split(separator: "\n").contains { URL(fileURLWithPath: String($0).trimmingCharacters(in: .whitespaces)).lastPathComponent == "OsxFL" }
         guard !existing else { throw fail("An FL Studio application is already running. Leave that session intact and quit it normally before launching the private copy.") }
@@ -243,7 +304,7 @@ final class Session {
         do { try fm.createDirectory(at: run, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700]) }
         catch { try? fm.removeItem(at: lock); throw error }
         let app = run.appendingPathComponent("FL Studio 2026.app"), manifest = run.appendingPathComponent("session.json")
-        let log = run.appendingPathComponent("bridge.log")
+        let log = run.appendingPathComponent("native-app.jsonl")
         let originalHandler = handlerSnapshot()
         receipt.merge(["launcher_version": launcherVersion, "launcher_implementation": "native-swift", "launcher_pid": getpid(), "run_id": runID, "run_directory": run.path,
                        "owned_app": app.path, "original_flp_handler": originalHandler as Any? ?? NSNull(), "normal_user_data_protected": normalData.path, "mode": testDevice == nil ? "normal" : "test", "project": project?.path as Any? ?? NSNull(), "helper_sha256": helperHash, "status": "preparing"]) { _, new in new }
@@ -251,10 +312,8 @@ final class Session {
         do {
             try jsonWrite(receipt, manifest)
             try jsonWrite(["launcher_pid": getpid(), "session": manifest.path], lock.appendingPathComponent("owner.json"))
-            let capacity = try fm.attributesOfFileSystem(forPath: run.path)[.systemFreeSize] as? NSNumber
-            guard (capacity?.uint64Value ?? 0) >= 5 * 1024 * 1024 * 1024 else { throw fail("At least 5 GiB free is required before preparing the private app copy.") }
             changed("Verifying and preparing a private FL Studio copy…")
-            try command("/bin/cp", ["-cR", source.path, app.path])
+            receipt["copy_mode"] = try copyPrivateApp(source, to: app, cache: cache)
             let copy = try inspect(app)
             for key in ["engine_sha256", "executable_sha256"] {
                 guard copy[key] as? String == receipt[key] as? String else { throw fail("Private copy failed verification.") }
@@ -262,7 +321,7 @@ final class Session {
             unregister(app)
             let home = run.appendingPathComponent("home"), tmp = run.appendingPathComponent("tmp")
             let userData = run.appendingPathComponent("user-data")
-            try preparePrivateHome(home, tmp: tmp, userData: userData)
+            try preparePrivateHome(home, tmp: tmp, userData: userData, testDevice: testDevice)
             let (sandbox, trampoline) = try prepareSandbox(run, source: source, normalData: normalData)
             var env = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("DYLD_") && !$0.key.hasPrefix("RYSUP_") && $0.key != "CFFIXED_USER_HOME" }
             env.merge(["RYSUP_FLARA_HELPER_PATH": helper.path, "RYSUP_FLARA_HELPER_MANIFEST": helper.deletingLastPathComponent().appendingPathComponent("helper.json").path,
@@ -278,12 +337,17 @@ final class Session {
                                       arguments: ["-f", sandbox.path, "/bin/sh", trampoline.path] + (project.map { [$0.path] } ?? []), environment: env, directory: run, console: console)
             process = task
             receipt["pid"] = task.processIdentifier; receipt["process_group"] = getpgid(task.processIdentifier); receipt["status"] = "starting"; try jsonWrite(receipt, manifest)
-            let deadline = Date().addingTimeInterval(20)
+            let deadline = Date().addingTimeInterval(180)
             var ready = false
             while Date() < deadline {
-                let content = (try? String(contentsOf: log, encoding: .utf8)) ?? ""
-                if content.contains("bridge_refused") { throw fail("The bridge refused this process. See \(run.path).") }
-                if content.contains("bridge_ready") { ready = true; break }
+                let duplicates = try liveExactProcesses(app.appendingPathComponent(executablePath)).filter { $0 != task.processIdentifier }
+                guard duplicates.isEmpty else { throw fail("An unbridged duplicate private FL process appeared (PIDs \(duplicates)). No process was adopted or stopped; preserve this app and lock until all copies exit.") }
+                let statusURL = run.appendingPathComponent("fl-ara-status.json")
+                if let data = try? Data(contentsOf: statusURL), let status = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   status["run_id"] as? String == runID, status["pid"] as? Int32 == task.processIdentifier {
+                    if let error = status["error"] as? String, !error.isEmpty { throw fail("Native FL bridge refused: \(error). See \(run.path).") }
+                    if status["runtime_helper_admitted"] as? Bool == true, status["native_engine_ready"] as? Bool == true { ready = true; break }
+                }
                 guard task.isRunning else { throw fail("The private FL Studio copy exited before bridge startup. See \(run.path).") }
                 Thread.sleep(forTimeInterval: 0.2)
             }
@@ -292,6 +356,8 @@ final class Session {
             changed("ARA bridge ready. Use the visible FL Studio copy normally. Quit that copy when finished.\nDiagnostics: \(run.path)")
             print("Private FL Studio PID \(task.processIdentifier). Diagnostics: \(run.path)")
             while task.isRunning {
+                let duplicates = try liveExactProcesses(app.appendingPathComponent(executablePath)).filter { $0 != task.processIdentifier }
+                guard duplicates.isEmpty else { throw fail("Additional private FL executables appeared (PIDs \(duplicates)); app copy and lock are preserved until all exit normally.") }
                 if receipt["ara_runtime_compatible"] as? Bool != false,
                    let handle = try? FileHandle(forReadingFrom: log) {
                     let size = (try? handle.seekToEnd()) ?? 0
@@ -312,9 +378,12 @@ final class Session {
             operationError = error; receipt["status"] = "failed"; receipt["error"] = error.localizedDescription
         }
         // Preserve every live child; a startup PID is never permission to kill a user session.
-        let alive = process?.isRunning == true
+        let remaining = try? liveExactProcesses(app.appendingPathComponent(executablePath))
+        let alive = process?.isRunning == true || remaining == nil || !(remaining?.isEmpty ?? true)
+        receipt["remaining_private_pids"] = remaining as Any? ?? NSNull()
         if alive {
-            receipt["status"] = "detached"; receipt["cleanup_pending"] = "FL Studio is still running; private copy and lock preserved."
+            receipt["status"] = "detached"; receipt["cleanup_pending"] = "At least one exact private executable is alive, or the inventory failed; copy and lock preserved."
+            if operationError == nil { operationError = fail("Private FL executables remain alive; preserve the copy and lock until all exit normally.") }
         } else {
             if fm.fileExists(atPath: app.path), canonical(app) == app {
                 unregister(app)
@@ -336,7 +405,10 @@ final class Session {
         changed("FL Studio exited. Private copy removed and original installation verified unchanged.\nDiagnostics: \(run.path)")
     }
 }
-func defaultCache() -> URL { fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/FLARALauncher") }
+func defaultCache() -> URL {
+    if let path = ProcessInfo.processInfo.environment["RYSUP_FLARA_CACHE_ROOT"], path.hasPrefix("/") { return URL(fileURLWithPath: path) }
+    return fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/FLARALauncher")
+}
 func bundledHelper() -> URL { Bundle.main.resourceURL!.appendingPathComponent("native/FLAppBridge.dylib") }
 final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow!; var status: NSTextField!; var buttons: [NSButton] = []; var busy = false; var session: Session?
@@ -396,7 +468,17 @@ func selfTest() throws {
     let home = base.appendingPathComponent("home"), tmp = base.appendingPathComponent("tmp"), data = base.appendingPathComponent("data")
     try preparePrivateHome(home, tmp: tmp, userData: data)
     let xml = try String(contentsOf: home.appendingPathComponent("Library/Preferences/Image-Line/reg.xml"), encoding: .utf8)
-    guard xml.contains(xmlEscape(data.path + "/")), !xml.contains("Registration"), !xml.contains("License") else { throw fail("Private registry test failed.") }
+    guard xml.contains(xmlEscape(data.path + "/")), !xml.contains("Registration"), !xml.contains("License"), !xml.contains("Device name"), !xml.contains("Plugin version specific") else { throw fail("Private registry test failed.") }
+    let document = try XMLDocument(xmlString: xml)
+    let rates = try document.nodes(forXPath: "//Key[@Name='Image-Line']/Key[@Name='FL Studio 26']/Key[@Name='Devices']/Key[@Name='Audio output']/Value[@Name='Sample rate' and @Type='2']")
+    guard rates.count == 1, rates[0].stringValue == "48000" else { throw fail("Normal-app rate is not the exact FL26 normal Devices/Audio output registry setting.") }
+    try preparePrivateHome(home, tmp: tmp, userData: data, testDevice: "Pro Tools Audio Bridge 2-A_UID")
+    let testXML = try String(contentsOf: home.appendingPathComponent("Library/Preferences/Image-Line/reg.xml"), encoding: .utf8)
+    let testDocument = try XMLDocument(xmlString: testXML)
+    let devices = try testDocument.nodes(forXPath: "//Key[@Name='Image-Line']/Key[@Name='FL Studio 26']/Key[@Name='Devices']/Key[@Name='Audio output']/Value[@Name='Device name' and @Type='2']")
+    guard devices.count == 1, devices[0].stringValue == "4Pro Tools Audio Bridge 2-A" else { throw fail("Test-only native device registry setting is incorrect.") }
+    let own = try liveExactProcesses(URL(fileURLWithPath: CommandLine.arguments[0]))
+    guard own.contains(getpid()) else { throw fail("Exact executable inventory failed to find this process.") }
     let link = base.appendingPathComponent("escape")
     try fm.createSymbolicLink(at: link, withDestinationURL: base)
     do { try rejectSymlinkAncestors(link.appendingPathComponent("nested")); throw fail("Symlink admitted.") }
@@ -413,7 +495,7 @@ func selfTest() throws {
     let allowed = base.appendingPathComponent("allowed.txt")
     _ = try command("/usr/bin/sandbox-exec", ["-f", sandbox.path, "/bin/sh", "-c", write, "test", allowed.path])
     guard fm.fileExists(atPath: allowed.path), try String(contentsOf: trampoline, encoding: .utf8).contains("export DYLD_INSERT_LIBRARIES=\"$RYSUP_FLARA_HELPER_PATH\"") else { throw fail("Sandbox allowed-write or trampoline test failed.") }
-    print("PASS private home, minimal registry, no license duplication, symlink refusal, denied source write, allowed owned-run write, SIP-safe helper trampoline. No FL process launched.")
+    print("PASS private home; normal48k+test-only native device registry; exact process inventory; no license duplication; symlink refusal; denied source write; allowed owned-run write; SIP-safe helper trampoline. No FL process launched.")
 }
 var args = Array(CommandLine.arguments.dropFirst())
 if args.isEmpty || args == ["--gui"] {
@@ -431,7 +513,7 @@ if args.isEmpty || args == ["--gui"] {
             case "--version": print(launcherVersion); exit(0)
             case "--check": check = true
             case "--cleanup": cleanup = true
-            case "--fl", "--cache":
+            case "--fl", "--cache", "--cache-root":
                 guard !args.isEmpty else { throw fail("\(arg) requires a path.") }; let path = URL(fileURLWithPath: args.removeFirst()); if arg == "--fl" { source = path } else { cache = path }
             default: guard !arg.hasPrefix("-"), project == nil else { throw fail("Unknown argument: \(arg)") }; project = canonical(URL(fileURLWithPath: arg))
             }

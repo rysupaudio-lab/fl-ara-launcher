@@ -419,7 +419,7 @@ final class Session {
             guard ready else { throw fail("Bridge startup was not confirmed. Any live FL Studio copy is preserved. See \(run.path).") }
             nativeStartupConfirmed = true
             receipt["status"] = "running"; try jsonWrite(receipt, manifest)
-            changed("Native FL engine ready. Experimental ARA compatibility still requires qualification. Quit this private copy when finished.\nDiagnostics: \(run.path)")
+            changed("FL Studio is open in a private copy. Wait for ARA audio preparation before playback. Quit this private copy when finished.\nDiagnostics: \(run.path)")
             print("Private FL Studio PID \(task.processIdentifier). Diagnostics: \(run.path)")
             while task.isRunning {
                 let duplicates = try liveExactProcesses(app.appendingPathComponent(executablePath)).filter { $0 != task.processIdentifier }

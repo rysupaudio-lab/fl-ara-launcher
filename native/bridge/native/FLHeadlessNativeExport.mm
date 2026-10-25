@@ -2,6 +2,7 @@
 #include "FLNativeApplication.h"
 #include "FLNativeSaveGuard.h"
 #import <Foundation/Foundation.h>
+#import <AppKit/AppKit.h>
 #include <AudioToolbox/AudioToolbox.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <mach/mach.h>
@@ -19,7 +20,7 @@
 #include <limits.h>
 namespace rysup::fl_ara { namespace {
 std::atomic<bool> inFlight{false};
-struct State {bool inspected=false,requested=false,attempted=false;NSString* root=nil;NSDictionary* request=nil;};
+struct State {bool inspected=false,requested=false,attempted=false;NSString* root=nil;NSString* documentWait=nil;NSDictionary* request=nil;};
 State& state(){static State* s=new State;return *s;}
 void require(bool okay,const char* error){if(!okay)throw std::runtime_error(error);}
 std::string canonical(const char* p){char b[PATH_MAX];return p&&realpath(p,b)?b:"";}
@@ -67,6 +68,26 @@ void receipt(NSDictionary* extra){
     NSString* path=[s.root stringByAppendingPathComponent:@"headless-export-result.json"];
     if(data){[data writeToFile:path options:NSDataWritingAtomic error:nil];chmod(path.fileSystemRepresentation,0600);}
 }
+// Reuse the existing converter export driver's document-title + no-modal
+// readiness signals. A coherent ARA graph alone can be observed while FL is
+// still inside a startup Warning's nested run loop. Never start export there.
+// This is an additional native-load barrier, not graph or audio authority.
+bool normalDocumentReady(NSString* project,NSString** reason){
+    if(NSApp.modalWindow){*reason=@"native_modal_window";return false;}
+    NSString* expected=[project.lastPathComponent stringByAppendingString:@" - FL Studio 2026"];
+    bool found=false;
+    for(NSWindow* window in NSApp.windows){
+        if(window.attachedSheet){*reason=@"native_attached_sheet";return false;}
+        if(!window.visible||window.miniaturized)continue;
+        NSString* title=window.title?:@"";
+        if([title isEqualToString:expected]){found=true;continue;}
+        NSString* lower=[title stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].lowercaseString;
+        if([lower isEqualToString:@"warning"]||[lower isEqualToString:@"confirm"]||[lower isEqualToString:@"confirmation"]){
+            *reason=@"native_warning_or_confirm";return false;}
+    }
+    if(!found){*reason=@"expected_project_window_not_visible";return false;}
+    return true;
+}
 NSDictionary* verifyOutput(NSString* output){
     struct stat st{};require(!lstat(output.fileSystemRepresentation,&st)&&S_ISREG(st.st_mode)&&st.st_uid==getuid()&&st.st_size>44,"Native export did not create an owned WAV");
     AudioFileID file=nullptr;require(AudioFileOpenURL((__bridge CFURLRef)[NSURL fileURLWithPath:output],kAudioFileReadPermission,kAudioFileWAVEType,&file)==noErr&&file,"Native output is not readable WAVE audio");
@@ -97,6 +118,13 @@ void pollHeadlessNativeExport(bool currentARAReady)noexcept{
             require([request[@"project_sha256"] isEqual:text(hashFile(project.fileSystemRepresentation))],"Owned export project bytes changed");
             receipt(@{@"state":@"waiting_for_current_ara_cache"});}
         if(!s.requested||!currentARAReady||!app.engineReady||currentNativeSaveTransaction())return;
+        NSString* waitReason=nil;
+        if(!normalDocumentReady(s.request[@"project"],&waitReason)){
+            if(![s.documentWait isEqualToString:waitReason]){s.documentWait=waitReason;
+                receipt(@{@"state":@"waiting_for_native_document",@"reason":waitReason});}
+            return;
+        }
+        s.documentWait=nil;
         std::int32_t transport=-1;require(readActualNativeTransportState(transport)&&transport==0,"Native export requires actual stopped transport");
         require(getppid()==app.parentProcessID&&getpid()==app.processID,"Owned export process identity changed");verifyCode(app);
         NSString* output=s.request[@"output"];struct stat st{};require(lstat(output.fileSystemRepresentation,&st)&&errno==ENOENT,"Owned export output already exists");

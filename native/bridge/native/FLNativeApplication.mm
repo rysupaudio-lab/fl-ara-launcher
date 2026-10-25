@@ -213,8 +213,12 @@ bool initializeNativeApplication(const NativeApplicationCallbacks& callbacks)noe
     if(const char* registry=getenv("RYSUP_FLARA_ORIGINAL_REGISTRY_PATH");registry&&*registry){
         RegistrationReadOptions options;options.originalRegistryPath=registry;
         options.exactWinBridgePath=app+"/Contents/Resources/FL/Shared/libwinbridge_x64.dylib";
-        if(!initializeRegistrationReadThrough(options))
-            writeNativeApplicationEvent("registration_read_through_unavailable");
+        if(!initializeRegistrationReadThrough(options)){
+            const auto diagnostic=registrationReadStats();
+            writeNativeApplicationEvent("registration_read_through_unavailable",
+                "stage="+std::to_string(static_cast<std::uint32_t>(diagnostic.stage))+
+                " errno="+std::to_string(diagnostic.immediateErrno));
+        }
     }
     s.enabled.store(true);
     if(uid){

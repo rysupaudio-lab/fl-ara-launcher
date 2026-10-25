@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <cerrno>
 #include <limits>
 #include <map>
 #include <mutex>
@@ -22,7 +23,9 @@ constexpr Key hkcu=2; // Actual WinBridge ABI, experimentally verified, not Win3
 constexpr Long failure=1, denied=5, moreData=234;
 constexpr const char* winBridgeSHA="433f8dc07e2fab6b1786c7963f7fabe01d86bce75582019e4de0c82dfff5c8f2";
 constexpr std::size_t limit=32*1024*1024;
-const std::u16string authRoot=u"software\\image-line\\registrations";
+// The helper may initialize this adapter from an earlier translation-unit
+// constructor. A namespace-global std::u16string is not initialized then.
+const std::u16string& registrationRoot(){static const std::u16string root=u"software\\image-line\\registrations";return root;}
 struct Value { std::u16string name,text; unsigned xmlType=0; };
 struct Node { std::vector<std::u16string> children; std::vector<Value> values; };
 struct State {
@@ -37,13 +40,20 @@ std::u16string units(NSString* s){if(!s)return{};std::u16string out(s.length,u'\
 std::u16string lower(const std::u16string& s){NSString* x=[[NSString alloc]initWithCharacters:reinterpret_cast<const unichar*>(s.data()) length:s.size()];return units(x.lowercaseString);}
 bool readWide(const Word* p,std::u16string& out){out.clear();if(!p)return true;for(std::size_t i=0;i<32768;++i){if(!p[i])return true;out+=p[i];}return false;}
 bool normalize(const std::u16string& input,std::u16string& out){out.clear();std::u16string part;auto commit=[&]{if(part.empty())return true;if(part==u"."||part==u"..")return false;if(!out.empty())out+=u'\\';out+=lower(part);part.clear();return true;};for(auto c:input){if(c==u'\\'||c==u'/'){if(!commit())return false;}else part+=c;}return commit();}
-bool auth(const std::u16string& path){return path==authRoot||(path.size()>authRoot.size()&&path.compare(0,authRoot.size(),authRoot)==0&&path[authRoot.size()]==u'\\');}
+bool auth(const std::u16string& path){const auto& root=registrationRoot();return path==root||(path.size()>root.size()&&path.compare(0,root.size(),root)==0&&path[root.size()]==u'\\');}
 bool resolve(Key key,const Word* sub,std::u16string& path){auto& s=state();std::u16string suffix;if(!readWide(sub,suffix))return false;auto a=s.fake.find(key);auto b=s.ordinary.find(key);if(a==s.fake.end()&&b==s.ordinary.end())return false;const auto& parent=a!=s.fake.end()?a->second:b->second;if(!suffix.empty()&&(suffix.front()==u'\\'||suffix.front()==u'/'))return normalize(suffix,path);return normalize(parent+(parent.empty()||suffix.empty()?u"":u"\\")+suffix,path);}
 bool fake(Key k){return state().fake.count(k)!=0;}
 bool affected(Key k,const Word* sub=nullptr){if(fake(k))return true;std::u16string path;return resolve(k,sub,path)&&auth(path);}
 template<class T>T original(const char* name){auto it=state().originals.find(name);return it==state().originals.end()?nullptr:reinterpret_cast<T>(it->second);}
-std::string shaFD(int fd){CC_SHA256_CTX hash;CC_SHA256_Init(&hash);std::array<unsigned char,65536> bytes{};ssize_t n;while((n=read(fd,bytes.data(),bytes.size()))>0)CC_SHA256_Update(&hash,bytes.data(),static_cast<CC_LONG>(n));if(n<0)return{};unsigned char digest[32];CC_SHA256_Final(digest,&hash);const char* hex="0123456789abcdef";std::string out;for(auto b:digest){out+=hex[b>>4];out+=hex[b&15];}return out;}
-bool bridgeSealed(const std::string& path){int fd=open(path.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW);if(fd<0)return false;const auto digest=shaFD(fd);close(fd);return digest==winBridgeSHA;}
+std::string shaFD(int fd,int& readError){readError=0;CC_SHA256_CTX hash;CC_SHA256_Init(&hash);std::array<unsigned char,65536> bytes{};ssize_t n;while((n=read(fd,bytes.data(),bytes.size()))>0)CC_SHA256_Update(&hash,bytes.data(),static_cast<CC_LONG>(n));if(n<0){readError=errno;return{};}unsigned char digest[32];CC_SHA256_Final(digest,&hash);const char* hex="0123456789abcdef";std::string out;for(auto b:digest){out+=hex[b>>4];out+=hex[b&15];}return out;}
+bool bridgeSealed(const std::string& path,RegistrationReadStats& stats){
+    stats.stage=RegistrationInitStage::bridgeOpen;
+    int fd=open(path.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+    if(fd<0){stats.immediateErrno=errno;stats.stage=RegistrationInitStage::bridgeOpenFailed;return false;}
+    stats.stage=RegistrationInitStage::bridgeRead;int readError=0;const auto digest=shaFD(fd,readError);close(fd);
+    if(readError){stats.immediateErrno=readError;stats.stage=RegistrationInitStage::bridgeReadFailed;return false;}
+    if(digest!=winBridgeSHA){stats.stage=RegistrationInitStage::bridgeSealMismatch;return false;}return true;
+}
 }
 }
 
@@ -52,27 +62,30 @@ bool bridgeSealed(const std::string& path){int fd=open(path.c_str(),O_RDONLY|O_C
 @public std::map<std::u16string,rysup::fl_ara::Node>* output;
 @public std::vector<std::u16string> keys;
 @public bool okay,insideValue; unsigned type;
+@public rysup::fl_ara::RegistrationReadStats* diagnostics;
 @public std::u16string valueName,valueText,valuePath;
 }
 @end
 @implementation RysUpRegistrationParser
-- (instancetype)init { if((self=[super init])){okay=true;insideValue=false;output=nullptr;}return self; }
+- (instancetype)init { if((self=[super init])){okay=true;insideValue=false;output=nullptr;diagnostics=nullptr;}return self; }
 - (void)parser:(NSXMLParser*)p didStartElement:(NSString*)element namespaceURI:(NSString*)uri qualifiedName:(NSString*)qualified attributes:(NSDictionary<NSString*,NSString*>*)attrs {
     using namespace rysup::fl_ara;(void)uri;(void)qualified;
-    if(insideValue){okay=false;[p abortParsing];return;}
+    if(insideValue){if(diagnostics)diagnostics->stage=RegistrationInitStage::parserNestedValue;okay=false;[p abortParsing];return;}
     if([element isEqualToString:@"Key"]){keys.push_back(units(attrs[@"Name"]));std::u16string path;for(std::size_t i=0;i<keys.size();++i)if(lower(keys[i])==u"hkey_current_user"){for(std::size_t j=i+1;j<keys.size();++j){if(!path.empty())path+=u'\\';path+=keys[j];}break;}
-        std::u16string normalized;if(normalize(path,normalized)&&auth(normalized)){if(output->count(normalized)){okay=false;[p abortParsing];return;}output->emplace(normalized,Node{});auto at=normalized.rfind(u'\\');if(at!=std::u16string::npos){const auto parent=normalized.substr(0,at);if(auth(parent)){auto& child=(*output)[parent].children;if(std::find_if(child.begin(),child.end(),[&](const auto& n){return lower(n)==lower(keys.back());})!=child.end()){okay=false;[p abortParsing];return;}child.push_back(keys.back());}}}
+        std::u16string normalized;if(normalize(path,normalized)&&auth(normalized)){if(output->count(normalized)){if(diagnostics)diagnostics->stage=RegistrationInitStage::parserDuplicateNode;okay=false;[p abortParsing];return;}output->emplace(normalized,Node{});auto at=normalized.rfind(u'\\');if(at!=std::u16string::npos){const auto parent=normalized.substr(0,at);if(auth(parent)){auto& child=(*output)[parent].children;if(std::find_if(child.begin(),child.end(),[&](const auto& n){return lower(n)==lower(keys.back());})!=child.end()){if(diagnostics)diagnostics->stage=RegistrationInitStage::parserDuplicateNode;okay=false;[p abortParsing];return;}child.push_back(keys.back());}}}
     }else if([element isEqualToString:@"Value"]){std::u16string path;for(std::size_t i=0;i<keys.size();++i)if(lower(keys[i])==u"hkey_current_user"){for(std::size_t j=i+1;j<keys.size();++j){if(!path.empty())path+=u'\\';path+=keys[j];}break;}
-        if(normalize(path,valuePath)&&auth(valuePath)){insideValue=true;valueName=units(attrs[@"Name"]);valueText.clear();NSString* t=attrs[@"Type"];if(!t||t.length!=1||[t characterAtIndex:0]<'0'||[t characterAtIndex:0]>'5'){okay=false;[p abortParsing];return;}type=[t characterAtIndex:0]-'0';}
+        if(normalize(path,valuePath)&&auth(valuePath)){insideValue=true;valueName=units(attrs[@"Name"]);valueText.clear();NSString* t=attrs[@"Type"];if(!t||t.length!=1||[t characterAtIndex:0]<'0'||[t characterAtIndex:0]>'5'){if(diagnostics)diagnostics->stage=RegistrationInitStage::parserTypeRejected;okay=false;[p abortParsing];return;}type=[t characterAtIndex:0]-'0';}
     }
 }
-- (void)parser:(NSXMLParser*)p foundCharacters:(NSString*)text {if(insideValue){valueText+=rysup::fl_ara::units(text);if(valueText.size()>4*1024*1024){okay=false;[p abortParsing];}}}
+- (void)parser:(NSXMLParser*)p foundCharacters:(NSString*)text {if(insideValue){valueText+=rysup::fl_ara::units(text);if(valueText.size()>4*1024*1024){if(diagnostics)diagnostics->stage=rysup::fl_ara::RegistrationInitStage::parserTextLimit;okay=false;[p abortParsing];}}}
 - (void)parser:(NSXMLParser*)p didEndElement:(NSString*)element namespaceURI:(NSString*)uri qualifiedName:(NSString*)qualified {
     using namespace rysup::fl_ara;(void)uri;(void)qualified;
-    if([element isEqualToString:@"Value"]&&insideValue){auto& values=(*output)[valuePath].values;if(std::find_if(values.begin(),values.end(),[&](const auto& v){return lower(v.name)==lower(valueName);})!=values.end()||values.size()>4096){okay=false;[p abortParsing];return;}values.push_back({valueName,valueText,type});insideValue=false;valueText.clear();}
+    if([element isEqualToString:@"Value"]&&insideValue){auto& values=(*output)[valuePath].values;if(std::find_if(values.begin(),values.end(),[&](const auto& v){return lower(v.name)==lower(valueName);})!=values.end()||values.size()>4096){if(diagnostics)diagnostics->stage=values.size()>4096?RegistrationInitStage::parserValueCountLimit:RegistrationInitStage::parserDuplicateValue;okay=false;[p abortParsing];return;}values.push_back({valueName,valueText,type});insideValue=false;valueText.clear();}
     if([element isEqualToString:@"Key"]&&!keys.empty())keys.pop_back();
 }
-- (void)parser:(NSXMLParser*)p parseErrorOccurred:(NSError*)error {(void)p;(void)error;okay=false;}
+- (void)parser:(NSXMLParser*)p parseErrorOccurred:(NSError*)error {
+    if(diagnostics){diagnostics->xmlErrorCode=error.code;diagnostics->xmlErrorLine=p.lineNumber>0?static_cast<std::uint64_t>(p.lineNumber):0;diagnostics->xmlErrorColumn=p.columnNumber>0?static_cast<std::uint64_t>(p.columnNumber):0;if(diagnostics->stage==rysup::fl_ara::RegistrationInitStage::parsing)diagnostics->stage=rysup::fl_ara::RegistrationInitStage::parserXMLError;}okay=false;
+}
 @end
 
 namespace rysup::fl_ara { namespace {
@@ -103,12 +116,54 @@ Long restore(Key k,const Word* file,DWord flags){auto& s=state();std::lock_guard
 Long save(Key k,const Word* file,void* security){auto& s=state();std::lock_guard<std::recursive_mutex> guard(s.mutex);if(affected(k)){++s.stats.deniedRegistrationWrites;return denied;}using Fn=Long(*)(Key,const Word*,void*);auto fn=original<Fn>("RegSaveKeyW");return fn?fn(k,file,security):failure;}
 void writeString(Key k,const Word* path,const Word* name,const Word* text){auto& s=state();std::lock_guard<std::recursive_mutex> guard(s.mutex);if(affected(k,path)){++s.stats.deniedRegistrationWrites;return;}using Fn=void(*)(Key,const Word*,const Word*,const Word*);auto fn=original<Fn>("RegWriteStringValue");if(fn)fn(k,path,name,text);}
 } // namespace
-bool initializeRegistrationReadThrough(const RegistrationReadOptions& options) noexcept {try{auto& s=state();std::lock_guard<std::recursive_mutex> guard(s.mutex);if(s.stats.initialized)return false;struct stat supplied{};if(lstat(options.originalRegistryPath.c_str(),&supplied)||!S_ISREG(supplied.st_mode))return false;const auto source=physical(options.originalRegistryPath),bridge=physical(options.exactWinBridgePath);if(source.empty()||bridge.empty()||!bridgeSealed(bridge))return false;
+bool initializeRegistrationReadThrough(const RegistrationReadOptions& options) noexcept {try{
+    auto& s=state();std::lock_guard<std::recursive_mutex> guard(s.mutex);
+    if(s.stats.initialized){s.stats.stage=RegistrationInitStage::alreadyInitialized;return false;}
+    auto& diagnostic=s.stats;diagnostic.immediateErrno=0;diagnostic.bytesRead=0;diagnostic.xmlErrorCode=0;diagnostic.xmlErrorLine=0;diagnostic.xmlErrorColumn=0;diagnostic.parsedRegistrationNodeCount=0;diagnostic.parsedRegistrationValueCount=0;
+    const auto reject=[&](RegistrationInitStage stage,int code=0){diagnostic.stage=stage;diagnostic.immediateErrno=code;return false;};
+    diagnostic.stage=RegistrationInitStage::sourceMetadata;struct stat supplied{};
+    if(lstat(options.originalRegistryPath.c_str(),&supplied))return reject(RegistrationInitStage::sourceLstatFailed,errno);
+    if(!S_ISREG(supplied.st_mode))return reject(RegistrationInitStage::sourceNotRegular);
+    diagnostic.stage=RegistrationInitStage::sourceRealpath;const auto source=physical(options.originalRegistryPath);
+    if(source.empty())return reject(RegistrationInitStage::sourceRealpathFailed,errno);
+    diagnostic.stage=RegistrationInitStage::bridgeRealpath;const auto bridge=physical(options.exactWinBridgePath);
+    if(bridge.empty())return reject(RegistrationInitStage::bridgeRealpathFailed,errno);
+    if(!bridgeSealed(bridge,diagnostic))return false;
 #if !defined(RYSUP_REGISTRY_ADAPTER_TESTING) || !RYSUP_REGISTRY_ADAPTER_TESTING
-    const passwd* user=getpwuid(getuid());if(!user||!user->pw_dir)return false;const auto expected=physical(std::string(user->pw_dir)+"/Library/Preferences/Image-Line/reg.xml");if(source!=expected)return false;
+    diagnostic.stage=RegistrationInitStage::ownerLookup;errno=0;const passwd* user=getpwuid(getuid());
+    if(!user)return reject(RegistrationInitStage::ownerLookupFailed,errno);
+    if(!user->pw_dir)return reject(RegistrationInitStage::ownerHomeMissing);
+    diagnostic.stage=RegistrationInitStage::ownerExpectedRealpath;const auto expected=physical(std::string(user->pw_dir)+"/Library/Preferences/Image-Line/reg.xml");
+    if(expected.empty())return reject(RegistrationInitStage::ownerExpectedRealpathFailed,errno);
+    if(source!=expected)return reject(RegistrationInitStage::ownerPathMismatch);
 #endif
-    int fd=open(source.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW);if(fd<0)return false;struct stat before{},after{};bool valid=fstat(fd,&before)==0&&S_ISREG(before.st_mode)&&before.st_uid==getuid()&&!(before.st_mode&0022)&&before.st_size>=0&&static_cast<std::uint64_t>(before.st_size)<=limit;NSMutableData* data=[NSMutableData data];std::array<unsigned char,65536> buffer{};ssize_t n=0;if(valid)while((n=read(fd,buffer.data(),buffer.size()))>0){[data appendBytes:buffer.data() length:static_cast<NSUInteger>(n)];if(data.length>limit){valid=false;break;}}valid=valid&&n==0&&fstat(fd,&after)==0&&before.st_dev==after.st_dev&&before.st_ino==after.st_ino&&before.st_size==after.st_size&&before.st_mtimespec.tv_sec==after.st_mtimespec.tv_sec&&before.st_mtimespec.tv_nsec==after.st_mtimespec.tv_nsec;close(fd);if(!valid)return false;NSString* text=[[NSString alloc]initWithData:data encoding:NSUTF8StringEncoding];if(!text||[text.uppercaseString containsString:@"<!DOCTYPE"]||[text rangeOfString:@"\0"].location!=NSNotFound)return false;std::map<std::u16string,Node> parsed;RysUpRegistrationParser* delegate=[RysUpRegistrationParser new];delegate->output=&parsed;NSXMLParser* parser=[[NSXMLParser alloc]initWithData:data];parser.shouldResolveExternalEntities=NO;parser.delegate=delegate;const bool parsedOkay=[parser parse]&&delegate->okay;[data resetBytesInRange:NSMakeRange(0,data.length)];if(!parsedOkay)return false;s.nodes=std::move(parsed);s.bridge=bridge;s.stats.initialized=true;s.stats.registrationBranchPresent=s.nodes.count(authRoot)!=0;for(const auto& item:s.nodes)s.stats.registrationValueCount+=item.second.values.size();return true;
+    diagnostic.stage=RegistrationInitStage::sourceOpen;int fd=open(source.c_str(),O_RDONLY|O_CLOEXEC|O_NOFOLLOW);
+    if(fd<0)return reject(RegistrationInitStage::sourceOpenFailed,errno);
+    const auto rejectFile=[&](RegistrationInitStage stage,int code=0){close(fd);return reject(stage,code);};
+    diagnostic.stage=RegistrationInitStage::sourceMetadataBefore;struct stat before{},after{};
+    if(fstat(fd,&before))return rejectFile(RegistrationInitStage::sourceFstatBeforeFailed,errno);
+    if(!S_ISREG(before.st_mode))return rejectFile(RegistrationInitStage::sourceNotRegular);
+    if(before.st_uid!=getuid())return rejectFile(RegistrationInitStage::sourceOwnerMismatch);
+    if(before.st_mode&0022)return rejectFile(RegistrationInitStage::sourceModeRejected);
+    if(before.st_size<0||static_cast<std::uint64_t>(before.st_size)>limit)return rejectFile(RegistrationInitStage::sourceSizeRejected);
+    NSMutableData* data=[NSMutableData data];std::array<unsigned char,65536> buffer{};ssize_t n=0;diagnostic.stage=RegistrationInitStage::sourceRead;
+    while((n=read(fd,buffer.data(),buffer.size()))>0){diagnostic.bytesRead+=static_cast<std::uint64_t>(n);[data appendBytes:buffer.data() length:static_cast<NSUInteger>(n)];if(data.length>limit)return rejectFile(RegistrationInitStage::sourceReadLimit);}
+    if(n<0)return rejectFile(RegistrationInitStage::sourceReadFailed,errno);
+    diagnostic.stage=RegistrationInitStage::sourceMetadataAfter;if(fstat(fd,&after))return rejectFile(RegistrationInitStage::sourceFstatAfterFailed,errno);
+    const bool unchanged=before.st_dev==after.st_dev&&before.st_ino==after.st_ino&&before.st_size==after.st_size&&before.st_mtimespec.tv_sec==after.st_mtimespec.tv_sec&&before.st_mtimespec.tv_nsec==after.st_mtimespec.tv_nsec;
+    close(fd);if(!unchanged)return reject(RegistrationInitStage::sourceChanged);
+    diagnostic.stage=RegistrationInitStage::sourceEncoding;NSString* text=[[NSString alloc]initWithData:data encoding:NSUTF8StringEncoding];
+    if(!text)return reject(RegistrationInitStage::sourceUTF8Rejected);
+    if([text.uppercaseString containsString:@"<!DOCTYPE"])return reject(RegistrationInitStage::sourceDoctypeRejected);
+    if([text rangeOfString:@"\0"].location!=NSNotFound)return reject(RegistrationInitStage::sourceNulRejected);
+    std::map<std::u16string,Node> parsed;RysUpRegistrationParser* delegate=[RysUpRegistrationParser new];delegate->output=&parsed;delegate->diagnostics=&diagnostic;
+    NSXMLParser* parser=[[NSXMLParser alloc]initWithData:data];parser.shouldResolveExternalEntities=NO;parser.delegate=delegate;diagnostic.stage=RegistrationInitStage::parsing;
+    const bool parsedOkay=[parser parse]&&delegate->okay;
+    diagnostic.parsedRegistrationNodeCount=parsed.size();for(const auto& item:parsed)diagnostic.parsedRegistrationValueCount+=item.second.values.size();
+    [data resetBytesInRange:NSMakeRange(0,data.length)];if(!parsedOkay)return false;
+    s.nodes=std::move(parsed);s.bridge=bridge;s.stats.initialized=true;s.stats.registrationBranchPresent=s.nodes.count(registrationRoot())!=0;for(const auto& item:s.nodes)s.stats.registrationValueCount+=item.second.values.size();diagnostic.stage=RegistrationInitStage::ready;return true;
 }catch(...){return false;}}
+
 void* observeRegistrationSymbol(const char* name,void* resolved) noexcept {try{auto& s=state();std::lock_guard<std::recursive_mutex> guard(s.mutex);if(!s.stats.initialized||!name||!resolved)return resolved;Dl_info image{};if(!dladdr(resolved,&image)||physical(image.dli_fname)!=s.bridge)return resolved;
 #define RYSUP_REGISTRY_SYMBOL(label,function) if(std::strcmp(name,label)==0){s.originals[label]=resolved;return reinterpret_cast<void*>(&function);}
     RYSUP_REGISTRY_SYMBOL("RegOpenKeyExW",openKey) RYSUP_REGISTRY_SYMBOL("RegCloseKey",closeKey) RYSUP_REGISTRY_SYMBOL("RegFlushKey",flushKey)

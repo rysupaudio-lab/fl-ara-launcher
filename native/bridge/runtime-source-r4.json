@@ -1,0 +1,39 @@
+{
+  "schema": "rysup.fl-ara-runtime-source-delta/1",
+  "candidate": "r4-startup",
+  "prior_runtime_source_manifest": "runtime-source-r3.json",
+  "upstream_source_freeze_sha256": "22502efaab2ce3097175f1c0b49f9975fd58132598e4b22de635541b09d18f3c",
+  "compile_manifest_sha256": "a0e47e5aeef4e39484e535b02eb2dd393532627ae23c5658cb166b7398af4eca",
+  "compiled_artifact_verification_sha256": "5853a9afaafa987cbf902955225c655ffacec322b993d6171294a6502168996c",
+  "compiled_helper_original_sha256": "5422c407bcc6c8480a6e52718e166a88a8286cf0258d17b5295c430d8bb29165",
+  "runtime_qualified": false,
+  "sdk_source_imported": false,
+  "vendor_binary_or_audio_imported": false,
+  "private_qa_static_review_imported": false,
+  "files": [
+    {
+      "path": "native/bridge/native/FLAppBridge.mm",
+      "previous_sha256": "90ef26fd14b1f410638374160f57d6d4df0b9419ee8a93306f0981aebb0d3ef7",
+      "sha256": "4416c117194b9a867746dfe5275d4b593bfb08834f5793d90737118c5d747a64",
+      "bytes": 95865
+    },
+    {
+      "path": "native/bridge/native/FLNativeApplication.mm",
+      "previous_sha256": "4a17c57e4ee0eeece9ac320b40e8a42263390490eff9fe68888806d6ac4f1742",
+      "sha256": "4970870fecd45cc3fa1d24f9b5315e1a53f8b5577d822a1b850e8d1b5f6bebad",
+      "bytes": 26936
+    },
+    {
+      "path": "native/bridge/native/RegistrationReadThrough.mm",
+      "previous_sha256": "08096b2dc4071d92fbba0d18f11ae16fca72e789b16314d3ecba3bad067ddbfa",
+      "sha256": "ef1e0b328ddfba50d320464b20e2ba5b5ea2601ea622ee8062b948c0e2b7e486",
+      "bytes": 25240
+    },
+    {
+      "path": "native/bridge/native/RegistrationReadThrough.h",
+      "previous_sha256": "a11c9ed22d4a31e0cabd1947f37786163ac9adf73702c294410e52660ad9421a",
+      "sha256": "21a83ebccd24c29084b896d21d2c0589c89259fe8b638430d566b5829e28f613",
+      "bytes": 2487
+    }
+  ]
+}

@@ -925,6 +925,9 @@ void status(){
         item[@"window_number"]=@(window.windowNumber);item[@"represented_url"]=window.representedURL.absoluteString?:@"";[ownWindows addObject:item];}
     const auto registration=registrationReadStats();
     data[@"registration_read_through"]=@{@"initialized":@(registration.initialized),@"branch_present":@(registration.registrationBranchPresent),
+        @"init_stage":@(static_cast<std::uint32_t>(registration.stage)),@"init_errno":@(registration.immediateErrno),@"source_bytes_read":@(registration.bytesRead),
+        @"xml_error_code":@(registration.xmlErrorCode),@"xml_error_line":@(registration.xmlErrorLine),@"xml_error_column":@(registration.xmlErrorColumn),
+        @"parsed_registration_node_count":@(registration.parsedRegistrationNodeCount),@"parsed_registration_value_count":@(registration.parsedRegistrationValueCount),
         @"value_count":@(registration.registrationValueCount),@"read_count":@(registration.registrationReads),@"denied_write_count":@(registration.deniedRegistrationWrites),
         @"vendor_license_validity_proven":@NO};
     data[@"own_windows_diagnostic_only"]=ownWindows;data[@"own_application_active"]=@(NSApp.active);

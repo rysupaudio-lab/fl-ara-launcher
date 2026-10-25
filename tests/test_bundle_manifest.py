@@ -36,6 +36,10 @@ class PublicManifest(unittest.TestCase):
    for field in ['strong_process_admission_compiled','authority_only_internal_cache_invalidation_compiled']:
     self.assertIs(compiled[field],True)
     with self.assertRaises(ValueError):m.sanitized_manifest(dict(cache,**{field:False}),helper,root)
+   diagnostic=dict(raw,candidate_kind='diagnostic-only-setup-and-physical-identity',diagnostic_only=True,guard_logic_changed=False,strong_process_admission_compiled=True)
+   observed=m.sanitized_manifest(diagnostic,helper,root);self.assertEqual(observed,m.sanitized_manifest(observed,helper,root));self.assertIs(observed['diagnostic_only'],True);self.assertIs(observed['guard_logic_changed'],False)
+   for change in [{'diagnostic_only':False},{'guard_logic_changed':True},{'actual_audio_io_qualified':True}]:
+    with self.assertRaises(ValueError):m.sanitized_manifest(dict(diagnostic,**change),helper,root)
    for change in [{'actual_audio_io_qualified':True},{'device_start_admission_compiled':False},{'runtime_qualified':True},{'candidate_kind':'qualified'}]:
     with self.subTest(change=change):
      with self.assertRaises(ValueError):m.sanitized_manifest(dict(raw,**change),helper,root)

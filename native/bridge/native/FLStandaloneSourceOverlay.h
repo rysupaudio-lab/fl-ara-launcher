@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
@@ -78,6 +79,62 @@ struct FLStandaloneSourceRead {
     bool outputMatchesActualNativeContext=false;
     std::uint8_t originalEnded=0,originalChanged=0;
 };
+// One-shot, immutable diagnostics only. No pointer in these values is ever
+// dereferenced by a status reader. Expected fields are prepared off RT from the
+// actual copied model; observed is copied from the already-built callback POD.
+inline constexpr std::size_t kFLStandalonePhysicalIdentityDiagnosticSlots=4;
+enum class FLStandalonePhysicalIdentityBranch : std::uint8_t {
+    None=0,MappingAgreementA=1,ObservedPhysicalSourceB=2
+};
+enum class FLStandalonePhysicalIdentityMismatch : std::uint32_t {
+    MissingEntry=1u<<0,MissingPhysical=1u<<1,MissingIndexed=1u<<2,
+    EntryBatch=1u<<3,PhysicalBatch=1u<<4,IndexedBatch=1u<<5,
+    EntryPhysicalSource=1u<<6,EntryIndexedSource=1u<<7,
+    MissingVoice=1u<<8,MissingReader=1u<<9,
+    ChannelObject=1u<<10,SampleObject=1u<<11,MixerInsert=1u<<12
+};
+struct FLStandalonePhysicalIdentityExpected {
+    std::uint16_t nativeChannelIndex=0;
+    std::int32_t nativeMixerInsert=-1;
+    std::uintptr_t channelObject=0,channelVMT=0,sampleObject=0,sampleVMT=0,pcmAddress=0;
+    std::int64_t sourceFrames=0;
+    std::uint32_t sourceChannels=0;
+    std::uintptr_t capturedModelAddress=0,capturedEngineBase=0,capturedChannelManager=0,capturedManagerPointerArray=0;
+    std::int32_t capturedManagerChannelCount=0;
+    std::uint64_t capturedChannelSnapshotIndex=0,capturedSourceSnapshotIndex=0;
+    std::uintptr_t capturedChannelObject=0,capturedChannelVMT=0;
+    std::int32_t capturedChannelType150=0,capturedMixerInsert248=-1;
+    bool completeManagerInspection=false,managerMemberPresent=false;
+    std::uint16_t capturedManagerMemberIndex=0;
+    std::uintptr_t capturedManagerMemberObject=0,capturedManagerMemberVMT=0;
+    std::int32_t capturedManagerMemberType150=0;
+};
+struct FLStandalonePhysicalIdentityCandidate {
+    bool present=false,regionPresent=false;
+    std::uintptr_t batchAddress=0,sourceAddress=0,actualNativeComponent=0;
+    std::uint64_t captureSerial=0,ticketEpoch=0,publicationGeneration=0;
+    std::int32_t nativeMixerInsert=-1,nativeClipID=-1;
+    std::uint64_t regionSourceIndex=0;
+    std::array<std::uint8_t,88> nativeRecord{};
+    FLStandalonePhysicalIdentityExpected expected;
+};
+struct FLStandalonePhysicalIdentityDiagnostic {
+    std::uint8_t slotIndex=0;
+    FLStandalonePhysicalIdentityBranch branch=FLStandalonePhysicalIdentityBranch::None;
+    std::uint32_t mismatchBits=0;
+    std::uint8_t presenceMask=0,agreementMask=0,matchingBatchCount=0;
+    std::uintptr_t protectedTableAddress=0,ownerBatchAddress=0,actualNativeComponent=0;
+    std::uint64_t tableBatchCount=0,tableRegionCount=0,tablePointerChannelCount=0,tableIndexedChannelCount=0;
+    std::uint64_t captureSerial=0,ticketEpoch=0,publicationGeneration=0;
+    FLStandaloneSourceRead observed;
+    FLStandalonePhysicalIdentityCandidate entry,physical,indexed;
+};
+// presenceMask bits0/1/2 = entry/physical/indexed present. agreementMask bits:
+// 0/1/2 = that candidate batch equals owner batch; 3/4/5 = source equality for
+// entry-physical / entry-indexed / physical-indexed (only when both present).
+// observed doubles may be nonfinite because this records a rejected read before
+// later format guards. Main JSON must serialize nonfinite as null/explicit raw
+// bits, never pass them unguarded to a JSON number writer.
 struct FLStandaloneOverlayCounters {
     std::uint64_t nativeCallbacks=0,unrelated=0,staleTicket=0;
     std::uint64_t appliedCallbacks=0,appliedFrames=0,zeroReadCallbacks=0,rejected=0;
@@ -93,12 +150,18 @@ struct FLStandaloneOverlayInstanceStats {
     bool published=false,ticketAuthorized=false;
     bool staleHoldActive=false;
     FLStandaloneOverlayCounters counters;
+    std::array<FLStandalonePhysicalIdentityDiagnostic,kFLStandalonePhysicalIdentityDiagnosticSlots> physicalIdentityDiagnostics{};
+    std::uint8_t physicalIdentityDiagnosticReadyMask=0;
+    bool physicalIdentityDiagnosticOverflow=false;
 };
 struct FLStandaloneOverlayFaultRecord {
     std::string instanceID;
     std::uintptr_t actualNativeComponent=0;
     std::uint64_t captureSerial=0,faultBits=0;
     FLStandaloneOverlayFault firstFault=FLStandaloneOverlayFault::None;
+    std::array<FLStandalonePhysicalIdentityDiagnostic,kFLStandalonePhysicalIdentityDiagnosticSlots> physicalIdentityDiagnostics{};
+    std::uint8_t physicalIdentityDiagnosticReadyMask=0;
+    bool physicalIdentityDiagnosticOverflow=false;
 };
 struct FLStandaloneOverlayStaleHoldRecord {
     std::string instanceID;

@@ -16,11 +16,13 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <limits>
 #include <new>
 #include <optional>
 #include <stdexcept>
@@ -35,6 +37,13 @@ namespace hooks=rysup::fl_ara::native_hooks;
 using Steinberg::kResultOk;using Steinberg::kResultFalse;
 void demand(bool okay,const char* reason){if(!okay)throw std::runtime_error(reason);}
 struct ObservedNativeInstance;
+struct NativeSetupDiagnostic {
+    std::atomic<bool> ready{false};
+    std::uint64_t sequence=0,epochBefore=0,epochAfter=0;
+    Steinberg::Vst::ProcessSetup actualSetup{};Steinberg::tresult originalResult=0;
+    bool mainThread=false,insideNativeProcess=false,dirtyBefore=false,dirtyAfter=false,qualifiedBefore=false,qualifiedAfter=false;
+};
+static_assert(sizeof(Steinberg::Vst::ProcessSetup)==24,"diagnostic must retain exact ProcessSetup POD layout");
 struct BridgeRecord {
     hooks::InstanceRecord* native=nullptr;
     std::atomic<ObservedNativeInstance*> currentControllerNode{nullptr};
@@ -47,6 +56,7 @@ struct BridgeRecord {
     NativeMixBoundary lastNativeMixBoundary,lifecycleBindingMixDiagnostic;bool modelMixBoundaryAvailable=false;
     bool disabled=false,boundary=false;std::atomic<bool> active{false},processing{false},observedInactive{false},observedStopped{false};
     std::atomic<bool> setupQualified{false};bool graphApplied=false,teardown=false,pendingPlainLoad=false,synchronousTerminating=false,teardownCallerVerified=false,actualNativeSaveMetadataCapture=false;
+    std::atomic<std::uint64_t> nativeSetupDiagnosticCount{0};std::atomic<std::uint32_t> nativeSetupDiagnosticSlots{0};std::array<NativeSetupDiagnostic,32> nativeSetupHistory;
     std::atomic<double> sampleRate{0};std::string error,appliedGraph,appliedModel,lastNativeStateCaller;
     std::optional<lab::FLStandaloneDecodedGraph> decoded;
     std::shared_ptr<const lab::FLNativeModelSnapshot> copied;
@@ -778,8 +788,30 @@ void ensureOverlayAtModelBoundary(){
     }
     if(!rt.overlayInstalled){const auto installed=rt.overlay->installLoadedNativeSourceHook();rt.overlayInstalled=installed.installed;demand(installed.installed,installed.reason.c_str());}
 }
+// First-32 reserved immutable completion slots. Each callback owns one slot; status
+// sees its POD only after release publication, including every early return.
+struct NativeSetupObservation {
+    BridgeRecord& owner;NativeSetupDiagnostic* slot=nullptr;
+    NativeSetupObservation(BridgeRecord& r,const Steinberg::Vst::ProcessSetup& setup,Steinberg::tresult result,const hooks::ThreadInfo& info)noexcept:owner(r){
+        auto count=r.nativeSetupDiagnosticCount.load(std::memory_order_relaxed);
+        while(count!=std::numeric_limits<std::uint64_t>::max()&&!r.nativeSetupDiagnosticCount.compare_exchange_strong(count,count+1,std::memory_order_relaxed)){}
+        auto index=r.nativeSetupDiagnosticSlots.load(std::memory_order_relaxed);
+        do{if(index>=r.nativeSetupHistory.size())return;}
+        while(!r.nativeSetupDiagnosticSlots.compare_exchange_strong(index,index+1,std::memory_order_relaxed));
+        slot=&r.nativeSetupHistory[index];slot->sequence=index+1;slot->actualSetup=setup;slot->originalResult=result;
+        slot->mainThread=info.isMainThread;slot->insideNativeProcess=info.insideNativeProcess;
+        slot->epochBefore=r.nativeCacheGate?r.nativeCacheGate->currentTicket().epoch:0;
+        slot->dirtyBefore=r.dirty.load();slot->qualifiedBefore=r.setupQualified.load();
+    }
+    ~NativeSetupObservation(){if(!slot)return;
+        slot->epochAfter=owner.nativeCacheGate?owner.nativeCacheGate->currentTicket().epoch:0;
+        slot->dirtyAfter=owner.dirty.load();slot->qualifiedAfter=owner.setupQualified.load();
+        slot->ready.store(true,std::memory_order_release);
+    }
+};
 void setup(hooks::InstanceRecord& n,const Steinberg::Vst::ProcessSetup& setup,Steinberg::tresult result,const hooks::ThreadInfo& info,void*)noexcept{
     auto* r=record(n);if(!r)return;
+    NativeSetupObservation diagnostic(*r,setup,result,info);
     r->sampleRate=setup.sampleRate;r->setupQualified=result==kResultOk&&setup.sampleRate==48000&&setup.symbolicSampleSize==Steinberg::Vst::kSample32;r->dirty=true;
     if(r->nativeCacheGate)r->nativeCacheGate->invalidate();
     if(!r->setupQualified||!info.isMainThread||!stopped()||currentNativeSaveTransaction())return;
@@ -850,6 +882,35 @@ void parameterNormalized(hooks::InstanceRecord& n,Steinberg::Vst::IEditControlle
 void fault(const char*,const hooks::ModuleRecord*,const hooks::InstanceRecord* n,const hooks::ThreadInfo&,void*)noexcept{
     if(n)if(auto* r=static_cast<BridgeRecord*>(n->ownerData.load()))r->fault=true;
 }
+// Main-thread JSON of immutable diagnostic POD only. Never dereference a
+// diagnostic address. Rejected reads may contain NaN/Inf before format guards.
+NSArray* nativeRecordDiagnosticJSON(const std::array<std::uint8_t,88>& bytes){NSMutableArray* out=[NSMutableArray arrayWithCapacity:88];for(auto value:bytes)[out addObject:@(value)];return out;}
+NSDictionary* finiteDoubleDiagnosticJSON(double value){std::uint64_t bits=0;std::memcpy(&bits,&value,sizeof(bits));const bool finite=std::isfinite(value);id number=finite?@(value):NSNull.null;return @{@"finite":@(finite),@"value":number,@"raw_bits":@(bits)};}
+NSDictionary* physicalExpectedDiagnosticJSON(const lab::FLStandalonePhysicalIdentityExpected& v){return @{@"native_channel_index":@(v.nativeChannelIndex),@"native_mixer_insert":@(v.nativeMixerInsert),@"channel_object":@(v.channelObject),@"channel_vmt":@(v.channelVMT),
+        @"sample_object":@(v.sampleObject),@"sample_vmt":@(v.sampleVMT),@"pcm_address":@(v.pcmAddress),@"source_frames":@(v.sourceFrames),
+        @"source_channels":@(v.sourceChannels),@"captured_model_address":@(v.capturedModelAddress),@"captured_engine_base":@(v.capturedEngineBase),@"captured_channel_manager":@(v.capturedChannelManager),
+        @"captured_manager_pointer_array":@(v.capturedManagerPointerArray),@"captured_manager_channel_count":@(v.capturedManagerChannelCount),@"captured_channel_snapshot_index":@(v.capturedChannelSnapshotIndex),@"captured_source_snapshot_index":@(v.capturedSourceSnapshotIndex),
+        @"captured_channel_object":@(v.capturedChannelObject),@"captured_channel_vmt":@(v.capturedChannelVMT),@"captured_channel_type150":@(v.capturedChannelType150),@"captured_mixer_insert248":@(v.capturedMixerInsert248),
+        @"complete_manager_inspection":@(v.completeManagerInspection),@"manager_member_present":@(v.managerMemberPresent),@"captured_manager_member_index":@(v.capturedManagerMemberIndex),@"captured_manager_member_object":@(v.capturedManagerMemberObject),
+        @"captured_manager_member_vmt":@(v.capturedManagerMemberVMT),@"captured_manager_member_type150":@(v.capturedManagerMemberType150)};}
+NSDictionary* physicalCandidateDiagnosticJSON(const lab::FLStandalonePhysicalIdentityCandidate& v){return @{@"present":@(v.present),@"region_present":@(v.regionPresent),@"batch_address":@(v.batchAddress),@"source_address":@(v.sourceAddress),
+        @"actual_native_component":@(v.actualNativeComponent),@"capture_serial":@(v.captureSerial),@"ticket_epoch":@(v.ticketEpoch),@"publication_generation":@(v.publicationGeneration),
+        @"native_mixer_insert":@(v.nativeMixerInsert),@"native_clip_id":@(v.nativeClipID),@"region_source_index":@(v.regionSourceIndex),@"native_record":nativeRecordDiagnosticJSON(v.nativeRecord),@"expected":physicalExpectedDiagnosticJSON(v.expected)};}
+NSDictionary* physicalObservedDiagnosticJSON(const lab::FLStandaloneSourceRead& v){return @{@"voice_record_read":@(v.voiceRecordRead),@"native_observation_complete":@(v.nativeObservationComplete),@"voice_object":@(v.voiceObject),@"voice_vmt":@(v.voiceVMT),
+        @"channel_object":@(v.channelObject),@"channel_vmt":@(v.channelVMT),@"sample_object":@(v.sampleObject),@"sample_vmt":@(v.sampleVMT),
+        @"reader_object":@(v.readerObject),@"reader_vmt":@(v.readerVMT),@"channel_sample328":@(v.channelSample328),@"reader_sample78":@(v.readerSample78),
+        @"native_pcm90":@(v.nativePCM90),@"reader_pcm40":@(v.readerPCM40),@"reference_c8":@(v.referenceC8),@"stretch_provider100":@(v.stretchProvider100),
+        @"native_clip_id":@(v.nativeClipID),@"native_mixer_insert":@(v.nativeMixerInsert),@"native_channel_index":@(v.nativeChannelIndex),@"native_source_frames":@(v.nativeSourceFrames),
+        @"pre_original_reader_position_read":@(v.preOriginalReaderPositionRead),@"native_format78":@(v.nativeFormat78),@"native_format79":@(v.nativeFormat79),@"reader_channels_a0":@(v.readerChannelsA0),
+        @"reader_format_a1":@(v.readerFormatA1),@"reader_stride48":@(v.readerStride48),@"native_block_frames":@(v.nativeBlockFrames),@"original_read_frames":@(v.originalReadFrames),
+        @"native_interleaved_stereo":@(reinterpret_cast<std::uintptr_t>(v.nativeInterleavedStereo)),@"output_matches_actual_native_context":@(v.outputMatchesActualNativeContext),@"original_ended":@(v.originalEnded),@"original_changed":@(v.originalChanged),@"native_record":nativeRecordDiagnosticJSON(v.nativeRecord),@"native_rate":finiteDoubleDiagnosticJSON(v.nativeRate),@"native_rate_factor":finiteDoubleDiagnosticJSON(v.nativeRateFactor),@"reader_step":finiteDoubleDiagnosticJSON(v.readerStep),@"source_start_frame":finiteDoubleDiagnosticJSON(v.sourceStartFrame),@"pre_original_reader_position":finiteDoubleDiagnosticJSON(v.preOriginalReaderPosition)};}
+NSDictionary* physicalIdentityDiagnosticJSON(const lab::FLStandalonePhysicalIdentityDiagnostic& v){return @{@"slot_index":@(v.slotIndex),@"mismatch_bits":@(v.mismatchBits),@"presence_mask":@(v.presenceMask),@"agreement_mask":@(v.agreementMask),
+        @"matching_batch_count":@(v.matchingBatchCount),@"protected_table_address":@(v.protectedTableAddress),@"owner_batch_address":@(v.ownerBatchAddress),@"actual_native_component":@(v.actualNativeComponent),
+        @"table_batch_count":@(v.tableBatchCount),@"table_region_count":@(v.tableRegionCount),@"table_pointer_channel_count":@(v.tablePointerChannelCount),@"table_indexed_channel_count":@(v.tableIndexedChannelCount),
+        @"capture_serial":@(v.captureSerial),@"ticket_epoch":@(v.ticketEpoch),@"publication_generation":@(v.publicationGeneration),@"branch":@(static_cast<std::uint8_t>(v.branch)),@"observed":physicalObservedDiagnosticJSON(v.observed),@"entry":physicalCandidateDiagnosticJSON(v.entry),@"physical":physicalCandidateDiagnosticJSON(v.physical),@"indexed":physicalCandidateDiagnosticJSON(v.indexed)};}
+NSArray* physicalIdentityHistoryDiagnosticJSON(const lab::FLStandaloneOverlayInstanceStats& cache){NSMutableArray* history=[NSMutableArray array];
+    for(std::size_t i=0;i<cache.physicalIdentityDiagnostics.size();++i)if(cache.physicalIdentityDiagnosticReadyMask&(std::uint8_t{1}<<i))[history addObject:physicalIdentityDiagnosticJSON(cache.physicalIdentityDiagnostics[i])];return history;
+}
 bool status(){
     auto& rt=runtime();const auto& app=nativeApplication();const auto cacheStats=rt.overlay?rt.overlay->instanceStatsOnModelThread():std::vector<lab::FLStandaloneOverlayInstanceStats>{};NSMutableArray* inserts=[NSMutableArray array];
     for(const auto& r:rt.records){NSMutableDictionary* d=[NSMutableDictionary dictionary];
@@ -875,6 +936,16 @@ bool status(){
         d[@"native_mix_identity_verified"]=@(r->lastNativeMixBoundary.nativeIdentityVerified);d[@"native_process_admission_allowed"]=@(admission.allowed);
         d[@"native_process_admission_active_count"]=@(admission.activeCount);d[@"native_process_admission_generation"]=@(admission.generation);d[@"native_process_admission_permanently_closed"]=@(admission.permanentlyClosed);
         d[@"native_process_admission_blocked_callbacks"]=@(r->native->blockedProcessCallbacks.load());
+        NSMutableArray* setupHistory=[NSMutableArray array];std::uint32_t setupReadyMask=0;
+        for(std::size_t i=0;i<r->nativeSetupHistory.size();++i){const auto& event=r->nativeSetupHistory[i];if(!event.ready.load(std::memory_order_acquire))continue;setupReadyMask|=std::uint32_t{1}<<i;
+            const bool finite=std::isfinite(event.actualSetup.sampleRate);
+            [setupHistory addObject:@{@"sequence":@(event.sequence),@"process_mode":@(event.actualSetup.processMode),@"symbolic_sample_size":@(event.actualSetup.symbolicSampleSize),
+                @"max_samples_per_block":@(event.actualSetup.maxSamplesPerBlock),@"sample_rate_finite":@(finite),@"sample_rate":@(finite?event.actualSetup.sampleRate:0.0),
+                @"original_result":@(event.originalResult),@"main_thread":@(event.mainThread),@"inside_native_process":@(event.insideNativeProcess),
+                @"cache_epoch_before":@(event.epochBefore),@"cache_epoch_after":@(event.epochAfter),@"dirty_before":@(event.dirtyBefore),@"dirty_after":@(event.dirtyAfter),
+                @"setup_qualified_before":@(event.qualifiedBefore),@"setup_qualified_after":@(event.qualifiedAfter)}];}
+        const auto setupCount=r->nativeSetupDiagnosticCount.load();d[@"native_setup_diagnostic_count"]=@(setupCount);d[@"native_setup_history"]=setupHistory;d[@"native_setup_history_capacity"]=@32;d[@"native_setup_history_ready_mask"]=@(setupReadyMask);
+        d[@"native_setup_history_overflow"]=@(setupCount>32?setupCount-32:0);d[@"native_setup_history_count_saturated"]=@(setupCount==std::numeric_limits<std::uint64_t>::max());d[@"native_setup_history_completed_only"]=@YES;
         d[@"native_set_active_calls"]=@(r->native->activationCalls.load());d[@"native_set_processing_calls"]=@(r->native->processingCalls.load());
         d[@"native_set_active_enabled"]=@(r->active.load());d[@"native_set_processing_enabled"]=@(r->processing.load());
         d[@"empty_lifecycle_bind_mix_diagnostic"]=@(nativeMixBoundaryReason(r->lifecycleBindingMixDiagnostic.reason));
@@ -890,6 +961,8 @@ bool status(){
             d[@"source_held_callbacks"]=@(cache.counters.heldCallbacks);d[@"source_held_frames"]=@(cache.counters.heldFrames);d[@"source_stale_hold_requests"]=@(cache.counters.staleHoldRequests);
             d[@"source_applied_callbacks"]=@(cache.counters.appliedCallbacks);d[@"source_applied_frames"]=@(cache.counters.appliedFrames);
             d[@"source_rejected_callbacks"]=@(cache.counters.rejected);d[@"source_fault_bits"]=@(cache.counters.faultBits);
+            d[@"physical_identity_diagnostic_ready_mask"]=@(cache.physicalIdentityDiagnosticReadyMask);d[@"physical_identity_diagnostic_overflow"]=@(cache.physicalIdentityDiagnosticOverflow);
+            d[@"physical_identity_diagnostics"]=physicalIdentityHistoryDiagnosticJSON(cache);d[@"physical_identity_diagnostic_addresses_are_values_only"]=@YES;
         }
         if(r->nativeProcessObserver){process_observer::Snapshot observed;
             if(r->nativeProcessObserver->trySnapshot(observed)){

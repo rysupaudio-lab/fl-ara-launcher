@@ -1,0 +1,48 @@
+{
+  "schema": "rysup.fl-ara-runtime-source-delta/1",
+  "candidate": "r9-diagnostics",
+  "prior_runtime_source_manifest": "runtime-source-r8.json",
+  "upstream_source_freeze_sha256": "25fc8b388c01879581cde4f0da062c01d14ef38bab46e9c30f1818d9fc6b165a",
+  "runtime_allowlist_sha256": "d165218be476e3f262b4331e2f8a73c0e3772ef72fa567caeb9a73bef5e20157",
+  "compile_manifest_sha256": "89a0a53762ac9ac015b1b74287a77aeb24b5c0fde54e14c4ace5aae294604ff3",
+  "compiled_artifact_verification_sha256": "e8e928449e3cb72401eede9b2c58a62824c1038ba4233c9696c6ea3d03e3a2d2",
+  "compiled_helper_original_sha256": "0882274b7c34d3fd76a6e9b74db3636fc609aa0bbf9edf7b7b911140698ca365",
+  "candidate_kind": "diagnostic-only-setup-and-physical-identity",
+  "diagnostic_only": true,
+  "guard_logic_changed": false,
+  "actual_audio_io_qualified": false,
+  "runtime_qualified": false,
+  "sdk_source_imported": false,
+  "vendor_binary_or_audio_imported": false,
+  "private_qa_static_review_imported": false,
+  "files": [
+    {
+      "path": "native/bridge/native/FLAppBridge.mm",
+      "previous_sha256": "ed3fb01a8d51a30d1a3090f51deaf6b294c113678e014f4ad8da872d52b4cc82",
+      "sha256": "e318969bd3ad0ad7a7e88d08d002b0f0d610d4e7bc0e0a0e6e1c81d8bbdf5726",
+      "bytes": 114092
+    },
+    {
+      "path": "native/bridge/native/FLStandaloneSourceOverlay.cpp",
+      "previous_sha256": "f329af6373142c6860fa8ae85053f5c6f37f1680317fdccb9816d8d3ce1477ea",
+      "sha256": "283919dc97bb5c21632ba51f24a4226a61d43668e80508c3ddde89a1fd20a88d",
+      "bytes": 126533
+    },
+    {
+      "path": "native/bridge/native/FLStandaloneSourceOverlay.h",
+      "previous_sha256": "2756f13be3599faf913cb2fa8e097794cbe18e74a2db30a512f63cfff70e88bc",
+      "sha256": "8bfa4e5af9f06fc207ddd646a965916c7c435c0cc08cbdd928f8d26e338f76dc",
+      "bytes": 12243
+    },
+    {
+      "path": "native/bridge/native/FL_NATIVE_SETUP_DIAGNOSTICS.md",
+      "sha256": "b9c926946b7a1dd0c26257748683592dabd9b860b86ad6a6fd220afdfd93ac6f",
+      "bytes": 2534
+    },
+    {
+      "path": "native/bridge/native/FL_SOURCE_PHYSICAL_DIAGNOSTICS.md",
+      "sha256": "ea12e5bcf37b636f7af348bcb52a22e0cc28c8b3258bbf02c7564d93612d3f6f",
+      "bytes": 3746
+    }
+  ]
+}

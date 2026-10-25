@@ -18,6 +18,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <utility>
 
 namespace rysup::ara_lab {
@@ -39,6 +40,9 @@ static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
 static_assert(std::atomic<std::uint8_t>::is_always_lock_free);
 static_assert(std::atomic<bool>::is_always_lock_free);
+static_assert(std::is_trivially_copyable<FLStandaloneSourceRead>::value);
+static_assert(std::is_trivially_copyable<FLStandalonePhysicalIdentityDiagnostic>::value);
+static_assert(kFLStandalonePhysicalIdentityDiagnosticSlots==4);
 using Digest=std::array<std::uint8_t,32>;
 using Record=std::array<std::uint8_t,88>;
 
@@ -175,10 +179,18 @@ struct FLStandaloneOverlayNativeThunk{
 };
 
 struct FLStandaloneSourceOverlay::Impl{
+    struct PhysicalDiagnosticSlot{
+        // One writer ever. 0 empty -> 1 exclusively writing -> 2 immutable ready.
+        // Never reset/reused; ready readers cannot race with a later overwrite.
+        std::atomic<std::uint8_t> state{0};
+        FLStandalonePhysicalIdentityDiagnostic value;
+    };
     struct Control{
         std::string id;std::uintptr_t component=0;AtomicCounters counters;
         std::atomic<std::uint64_t> pendingBits{0},faultCaptureSerial{0};
         std::atomic<std::uint8_t> firstFault{0};
+        std::array<PhysicalDiagnosticSlot,kFLStandalonePhysicalIdentityDiagnosticSlots> physicalDiagnostics;
+        std::atomic<bool> physicalDiagnosticOverflow{false};
         std::atomic<bool> holdDelivery{false};
         std::atomic<std::uint64_t> holdEpisodeGeneration{0},activePublicationGeneration{0};
     };
@@ -187,6 +199,8 @@ struct FLStandaloneSourceOverlay::Impl{
         std::uint16_t channelIndex=0;std::uintptr_t channel=0,sample=0,pcm=0,channelVMT=0,sampleVMT=0;
         std::int64_t frames=0;std::uint32_t channels=0;
         const WholeModificationSourceCache* cache=nullptr;
+        FLStandalonePhysicalIdentityExpected physicalExpected;
+
     };
     struct Region{std::int32_t id=-1;Record record{};std::size_t sourceIndex=0;};
     struct Batch{
@@ -299,6 +313,23 @@ struct FLStandaloneSourceOverlay::Impl{
             Source source;source.sourceID=sourceID;source.modificationID=modificationID;source.pcmSHA=parseDigest(digest);source.channelIndex=channel->managerIndex;
             source.channel=channel->channelObject;source.sample=sample.waveSampleObject;source.pcm=sample.nativePCMAddress90;source.channelVMT=channel->actualChannelVMT;
             source.sampleVMT=sample.actualWaveSampleVMT;source.frames=sample.nativeFrameCount98;source.channels=channels;source.cache=cache;
+            // Immutable diagnostic provenance prepared OFF RT. RT copies these
+            // values only; no later native/model-manager dereference is needed.
+            auto& expected=source.physicalExpected;expected.nativeChannelIndex=source.channelIndex;expected.nativeMixerInsert=next->mixer;
+            expected.channelObject=source.channel;expected.channelVMT=source.channelVMT;expected.sampleObject=source.sample;expected.sampleVMT=source.sampleVMT;
+            expected.pcmAddress=source.pcm;expected.sourceFrames=source.frames;expected.sourceChannels=source.channels;
+            expected.capturedModelAddress=reinterpret_cast<std::uintptr_t>(next->model.get());expected.capturedEngineBase=next->model->engineImageBase;
+            expected.capturedChannelManager=next->model->nativeChannelManager;expected.capturedManagerPointerArray=next->model->nativeChannelPointerArray;
+            expected.capturedManagerChannelCount=next->model->nativeChannelCount;
+            expected.capturedChannelSnapshotIndex=static_cast<std::uint64_t>(std::distance(next->model->channels.begin(),channel));
+            expected.capturedSourceSnapshotIndex=channel->sourceSnapshotIndex;expected.capturedChannelObject=channel->channelObject;
+            expected.capturedChannelVMT=channel->actualChannelVMT;expected.capturedChannelType150=channel->nativeChannelType150;expected.capturedMixerInsert248=channel->nativeMixerInsert248;
+            expected.completeManagerInspection=next->model->allNativeManagerChannelsInspected;
+            if(channel->managerIndex<next->model->nativeManagerMembers.size()){
+                const auto& member=next->model->nativeManagerMembers[channel->managerIndex];expected.managerMemberPresent=true;
+                expected.capturedManagerMemberIndex=member.managerIndex;expected.capturedManagerMemberObject=member.actualChannelObject;
+                expected.capturedManagerMemberVMT=member.actualChannelVMT;expected.capturedManagerMemberType150=member.nativeChannelType150;
+            }
             demand(sourceMap.emplace(sourceID,next->sources.size()).second,"standalone source duplicate physical source mapping");next->sources.push_back(std::move(source));
         }
         std::set<std::int32_t> clipIDs;next->regions.reserve(decoded.regions.size());
@@ -357,6 +388,62 @@ struct FLStandaloneSourceOverlay::Impl{
         const auto found=live.find(id);if(found!=live.end())demand(!found->second->cache.gate->authorizes(found->second->cache.ticket),
             "standalone source table-only removal refuses its authorized live ticket");
     }
+    static FLStandalonePhysicalIdentityCandidate diagnosticCandidate(const Batch* batch,const Source* source,const Region* region)noexcept{
+        FLStandalonePhysicalIdentityCandidate value;if(!batch||!source)return value;
+        value.present=true;value.batchAddress=reinterpret_cast<std::uintptr_t>(batch);value.sourceAddress=reinterpret_cast<std::uintptr_t>(source);
+        value.actualNativeComponent=batch->control->component;value.captureSerial=batch->cache.captureSerial;value.ticketEpoch=batch->cache.ticket.epoch;
+        value.publicationGeneration=batch->publicationGeneration;value.nativeMixerInsert=batch->mixer;value.expected=source->physicalExpected;
+        if(region){value.regionPresent=true;value.nativeClipID=region->id;value.regionSourceIndex=region->sourceIndex;value.nativeRecord=region->record;}
+        return value;
+    }
+    void capturePhysicalIdentityDiagnostic(const Table& table,const Batch& owner,const FLStandaloneSourceRead& read,
+        FLStandalonePhysicalIdentityBranch branch,const Table::Entry* entry,const Table::Channel* physical,const Table::Channel* indexed,
+        std::size_t matchingBatchCount)noexcept{
+        // Called only under process()'s existing ReaderGuard, BEFORE fault()
+        // invalidates anything. At most four strong CAS attempts, no wrapping
+        // reservation counter, no retry loop, allocation, new read or blocking.
+        auto& control=*owner.control;
+        for(std::size_t i=0;i<control.physicalDiagnostics.size();++i){auto& slot=control.physicalDiagnostics[i];std::uint8_t empty=0;
+            if(!slot.state.compare_exchange_strong(empty,1,std::memory_order_relaxed,std::memory_order_relaxed))continue;
+            auto& value=slot.value;value.slotIndex=static_cast<std::uint8_t>(i);value.branch=branch;value.matchingBatchCount=static_cast<std::uint8_t>(matchingBatchCount);
+            value.protectedTableAddress=reinterpret_cast<std::uintptr_t>(&table);value.ownerBatchAddress=reinterpret_cast<std::uintptr_t>(&owner);
+            value.actualNativeComponent=control.component;value.tableBatchCount=table.batches.size();value.tableRegionCount=table.regions.size();
+            value.tablePointerChannelCount=table.channelsByPointer.size();value.tableIndexedChannelCount=table.channelsByIndex.size();
+            value.captureSerial=owner.cache.captureSerial;value.ticketEpoch=owner.cache.ticket.epoch;value.publicationGeneration=owner.publicationGeneration;value.observed=read;
+            if(entry){value.presenceMask|=1;value.entry=diagnosticCandidate(entry->batch,entry->source,entry->region);if(entry->batch==&owner)value.agreementMask|=1;}
+            if(physical){value.presenceMask|=2;value.physical=diagnosticCandidate(physical->batch,physical->source,nullptr);if(physical->batch==&owner)value.agreementMask|=2;}
+            if(indexed){value.presenceMask|=4;value.indexed=diagnosticCandidate(indexed->batch,indexed->source,nullptr);if(indexed->batch==&owner)value.agreementMask|=4;}
+            if(entry&&physical&&entry->source==physical->source)value.agreementMask|=8;
+            if(entry&&indexed&&entry->source==indexed->source)value.agreementMask|=16;
+            if(physical&&indexed&&physical->source==indexed->source)value.agreementMask|=32;
+            const auto mismatch=[&](FLStandalonePhysicalIdentityMismatch bit){value.mismatchBits|=static_cast<std::uint32_t>(bit);};
+            if(branch==FLStandalonePhysicalIdentityBranch::MappingAgreementA){
+                if(!entry)mismatch(FLStandalonePhysicalIdentityMismatch::MissingEntry);
+                if(!physical)mismatch(FLStandalonePhysicalIdentityMismatch::MissingPhysical);
+                if(!indexed)mismatch(FLStandalonePhysicalIdentityMismatch::MissingIndexed);
+                if(entry&&entry->batch!=&owner)mismatch(FLStandalonePhysicalIdentityMismatch::EntryBatch);
+                if(physical&&physical->batch!=&owner)mismatch(FLStandalonePhysicalIdentityMismatch::PhysicalBatch);
+                if(indexed&&indexed->batch!=&owner)mismatch(FLStandalonePhysicalIdentityMismatch::IndexedBatch);
+                if(entry&&physical&&entry->source!=physical->source)mismatch(FLStandalonePhysicalIdentityMismatch::EntryPhysicalSource);
+                if(entry&&indexed&&entry->source!=indexed->source)mismatch(FLStandalonePhysicalIdentityMismatch::EntryIndexedSource);
+            }else if(branch==FLStandalonePhysicalIdentityBranch::ObservedPhysicalSourceB&&entry){const auto& source=*entry->source;
+                if(!read.voiceObject)mismatch(FLStandalonePhysicalIdentityMismatch::MissingVoice);
+                if(!read.readerObject)mismatch(FLStandalonePhysicalIdentityMismatch::MissingReader);
+                if(read.channelObject!=source.channel)mismatch(FLStandalonePhysicalIdentityMismatch::ChannelObject);
+                if(read.sampleObject!=source.sample)mismatch(FLStandalonePhysicalIdentityMismatch::SampleObject);
+                if(read.nativeMixerInsert!=owner.mixer)mismatch(FLStandalonePhysicalIdentityMismatch::MixerInsert);
+            }
+            slot.state.store(2,std::memory_order_release);return;
+        }
+        control.physicalDiagnosticOverflow.store(true,std::memory_order_release);
+    }
+    template<class Row>static void copyPhysicalIdentityDiagnostics(const Control& control,Row& row)noexcept{
+        // Acquire only Ready immutable slots. A Writing slot is skipped, never
+        // waited for. No consumer clears readiness or re-arms a producer slot.
+        for(std::size_t i=0;i<control.physicalDiagnostics.size();++i){const auto& slot=control.physicalDiagnostics[i];
+            if(slot.state.load(std::memory_order_acquire)==2){row.physicalIdentityDiagnostics[i]=slot.value;row.physicalIdentityDiagnosticReadyMask|=static_cast<std::uint8_t>(1u<<i);}}
+        row.physicalIdentityDiagnosticOverflow=control.physicalDiagnosticOverflow.load(std::memory_order_acquire);
+    }
     void fault(const Table& t,const std::array<const Batch*,3>& matches,std::size_t count,FLStandaloneOverlayFault reason)noexcept{
         const auto bit=std::uint64_t(1)<<static_cast<unsigned>(reason);totals.rejected.fetch_add(1);totals.bits.fetch_or(bit);
         for(std::size_t i=0;i<count;++i){auto* b=matches[i];if(!b)continue;
@@ -414,8 +501,9 @@ struct FLStandaloneSourceOverlay::Impl{
         const auto deny=[&](FLStandaloneOverlayFault reason){fault(*t,matches,count,reason);return FLStandaloneOverlayOutcome::Rejected;};
         if(count!=1)return deny(FLStandaloneOverlayFault::AmbiguousTarget);
         const auto* b=matches[0];
-        if(!entry||!physical||!indexed||entry->batch!=b||physical->batch!=b||indexed->batch!=b||entry->source!=physical->source||entry->source!=indexed->source)
-            return deny(FLStandaloneOverlayFault::PhysicalIdentity);
+        if(!entry||!physical||!indexed||entry->batch!=b||physical->batch!=b||indexed->batch!=b||entry->source!=physical->source||entry->source!=indexed->source){
+            capturePhysicalIdentityDiagnostic(*t,*b,r,FLStandalonePhysicalIdentityBranch::MappingAgreementA,entry,physical,indexed,count);
+            return deny(FLStandaloneOverlayFault::PhysicalIdentity);}
         const auto& s=*entry->source;
         if(r.voiceVMT&&r.voiceVMT!=config.actualEngineImageBase+voiceVMTOffset)
             return deny(FLStandaloneOverlayFault::ClassSeal);
@@ -423,8 +511,9 @@ struct FLStandaloneSourceOverlay::Impl{
         if(r.voiceVMT!=config.actualEngineImageBase+voiceVMTOffset||r.channelVMT!=s.channelVMT||r.sampleVMT!=s.sampleVMT||r.readerVMT!=config.actualEngineImageBase+readerVMTOffset)
             return deny(FLStandaloneOverlayFault::ClassSeal);
         if(r.nativeRecord!=entry->region->record||r.nativeClipID!=entry->region->id)return deny(FLStandaloneOverlayFault::RecordIdentity);
-        if(!r.voiceObject||!r.readerObject||r.channelObject!=s.channel||r.sampleObject!=s.sample||r.nativeMixerInsert!=b->mixer)
-            return deny(FLStandaloneOverlayFault::PhysicalIdentity);
+        if(!r.voiceObject||!r.readerObject||r.channelObject!=s.channel||r.sampleObject!=s.sample||r.nativeMixerInsert!=b->mixer){
+            capturePhysicalIdentityDiagnostic(*t,*b,r,FLStandalonePhysicalIdentityBranch::ObservedPhysicalSourceB,entry,physical,indexed,count);
+            return deny(FLStandaloneOverlayFault::PhysicalIdentity);}
         if(r.channelSample328!=s.sample||r.readerSample78!=s.sample||r.nativePCM90!=s.pcm||r.readerPCM40!=s.pcm)
             return deny(FLStandaloneOverlayFault::PointerRelation);
         if(r.nativeSourceFrames!=s.frames||r.nativeRate!=48000||r.nativeRateFactor!=1||r.nativeFormat78!=s.channels||r.nativeFormat79!=0)
@@ -520,6 +609,7 @@ FLStandaloneOverlayCounters FLStandaloneSourceOverlay::counters()const noexcept{
 std::vector<FLStandaloneOverlayInstanceStats> FLStandaloneSourceOverlay::instanceStatsOnModelThread()const{
     p->requireMain();std::vector<FLStandaloneOverlayInstanceStats> rows;rows.reserve(p->controls.size());
     for(const auto& pair:p->controls){FLStandaloneOverlayInstanceStats row;row.instanceID=pair.first;row.counters=pair.second->counters.snapshot();
+        Impl::copyPhysicalIdentityDiagnostics(*pair.second,row);
         const auto found=p->live.find(pair.first);if(found!=p->live.end()){const auto& batch=*found->second;row.nativeMixerInsert=batch.mixer;row.captureSerial=batch.cache.captureSerial;
             row.ticketEpoch=batch.cache.ticket.epoch;row.sources=batch.sources.size();row.regions=batch.regions.size();row.published=true;row.ticketAuthorized=batch.cache.gate->authorizes(batch.cache.ticket);
             row.staleHoldActive=batch.control->holdEpisodeGeneration.load()==batch.publicationGeneration;}rows.push_back(std::move(row));}return rows;
@@ -531,7 +621,8 @@ std::vector<FLStandaloneOverlayFaultRecord> FLStandaloneSourceOverlay::takeFault
         // Bits are the authoritative coalesced fault set. A notification racing
         // this drain can reset the first-code hint; retain a valid reason from
         // the exact drained bits rather than reporting None for a real fault.
-        out.push_back({pair.first,c.component,c.faultCaptureSerial.load(),bits,static_cast<FLStandaloneOverlayFault>(code)});}return out;
+        FLStandaloneOverlayFaultRecord row{pair.first,c.component,c.faultCaptureSerial.load(),bits,static_cast<FLStandaloneOverlayFault>(code)};
+        Impl::copyPhysicalIdentityDiagnostics(c,row);out.push_back(std::move(row));}return out;
 }
 std::vector<FLStandaloneOverlayStaleHoldRecord> FLStandaloneSourceOverlay::takeStaleHoldsOnModelThread(){
     p->requireMain();std::vector<FLStandaloneOverlayStaleHoldRecord> out;
@@ -629,6 +720,15 @@ struct FLStandaloneSourceOverlayOfflineAccess{
     static std::size_t regionCount(const void* pointer)noexcept{return static_cast<const FLStandaloneSourceOverlay::Impl::Table*>(pointer)->regions.size();}
     static float cacheValue(const void* pointer)noexcept{return static_cast<const FLStandaloneSourceOverlay::Impl::Table*>(pointer)->regions[0].source->cache->channels[0][2];}
     static std::size_t retiredCount(const FLStandaloneSourceOverlay& router)noexcept{return router.p->retired.size();}
+    static void seedUnrelatedLegacyCountersNearWrap(FLStandaloneSourceOverlay& router)noexcept{
+        for(auto& item:router.p->controls){item.second->counters.calls.store(std::numeric_limits<std::uint64_t>::max()-2);
+            item.second->counters.rejected.store(std::numeric_limits<std::uint64_t>::max()-2);}
+    }
+    static void diagnoseBorrowedTable(FLStandaloneSourceOverlay& router,const void* raw,const FLStandaloneSourceRead& read)noexcept{
+        const auto& table=*static_cast<const FLStandaloneSourceOverlay::Impl::Table*>(raw);const auto& entry=table.regions[0];
+        router.p->capturePhysicalIdentityDiagnostic(table,*entry.batch,read,FLStandalonePhysicalIdentityBranch::ObservedPhysicalSourceB,
+            &entry,&table.channelsByPointer[0],&table.channelsByIndex[0],1);
+    }
 };
 namespace {
 constexpr std::uintptr_t syntheticBase=0x100000000ULL;
@@ -647,7 +747,7 @@ void updateSynthetic(FLNativeClipSnapshot& clip){
 std::shared_ptr<FLNativeModelSnapshot> syntheticModel(){
     auto model=std::make_shared<FLNativeModelSnapshot>();model->engineImageBase=syntheticBase;model->loadedImagePath="/SYNTHETIC/no-native-image-loaded";
     model->verifiedArm64SliceSHA256=kFLStandaloneOverlayEngineArm64SHA256;model->repeatedReadsMatched=true;
-    model->nativeRecordStride=88;model->nativeChannelCount=5;model->currentArrangementIndex=0;model->currentArrangementObject=0x200000;
+    model->nativeRecordStride=88;model->nativeChannelManager=0x2a0000;model->nativeChannelPointerArray=0x2b0000;model->nativeChannelCount=5;model->currentArrangementIndex=0;model->currentArrangementObject=0x200000;
     model->arrangementObjects={model->currentArrangementObject};
     for(int c=0;c<2;++c){FLNativeSourceSnapshot source;source.waveSampleObject=0x300000+c*0x1000;
         source.actualWaveSampleVMT=syntheticBase+sampleVMTOffset;source.nativePCMAddress90=0x500000+c*0x1000;
@@ -958,6 +1058,121 @@ void observedChannelClassControls(){
     rejectClass("observed-derived channel refuses mismatched reader member object",
         [](auto& model){++model.nativeManagerMembers[model.channels[0].managerIndex].actualChannelObject;},false);
 }
+std::uint32_t physicalBit(FLStandalonePhysicalIdentityMismatch value){return static_cast<std::uint32_t>(value);}
+void physicalDiagnosticBranchControls(){
+    using Branch=FLStandalonePhysicalIdentityBranch;using M=FLStandalonePhysicalIdentityMismatch;
+    {
+        OfflineFixture f;auto read=f.read();read.channelObject+=0x100000;read.nativeRate=std::numeric_limits<double>::quiet_NaN();const auto output=f.output;
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Rejected&&f.output==output,"mapping diagnostic changed existing rejection/output");
+        const auto stats=f.router.instanceStatsOnModelThread();demand(stats.size()==1&&stats[0].physicalIdentityDiagnosticReadyMask==1&&!stats[0].physicalIdentityDiagnosticOverflow,"first physical diagnostic not ready once");
+        const auto& d=stats[0].physicalIdentityDiagnostics[0];const auto& channel=f.model->channels[0];
+        demand(d.branch==Branch::MappingAgreementA&&d.slotIndex==0&&d.presenceMask==5&&d.mismatchBits==physicalBit(M::MissingPhysical)&&d.matchingBatchCount==1,
+            "mapping branch/absence diagnostics conflated with late source branch");
+        demand(d.entry.present&&d.entry.regionPresent&&!d.physical.present&&d.indexed.present&&d.entry.nativeRecord==read.nativeRecord
+            &&d.entry.expected.nativeChannelIndex==channel.managerIndex&&d.indexed.expected.channelObject==channel.channelObject
+            &&d.entry.expected.capturedChannelManager==f.model->nativeChannelManager&&d.entry.expected.capturedManagerPointerArray==f.model->nativeChannelPointerArray
+            &&d.entry.expected.capturedManagerMemberObject==channel.channelObject&&d.entry.expected.capturedSourceSnapshotIndex==channel.sourceSnapshotIndex,
+            "mapping diagnostic lost protected candidate/record/captured manager provenance");
+        demand(d.observed.channelObject==read.channelObject&&std::isnan(d.observed.nativeRate)&&d.observed.nativeRecord==read.nativeRecord,"already observed POD/nonfinite value was transformed");
+        const auto faults=f.router.takeFaultsOnModelThread();demand(faults.size()==1&&faults[0].physicalIdentityDiagnosticReadyMask==1
+            &&faults[0].physicalIdentityDiagnostics[0].observed.channelObject==read.channelObject,"fault drain did not carry immutable first diagnostic");
+        demand(f.router.instanceStatsOnModelThread()[0].physicalIdentityDiagnosticReadyMask==1,"fault drain reset diagnostic readiness");
+        pass("PhysicalIdentity branch A records absent physical lookup, exact observed POD/record and captured manager/indexed source before fault; nonfinite doubles stay raw");
+    }
+    {
+        OfflineFixture f;auto read=f.read();read.nativeClipID=999;putSynthetic(read.nativeRecord,32,read.nativeClipID);
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Rejected,"missing-entry physical fault changed");
+        const auto stats=f.router.instanceStatsOnModelThread();const auto& d=stats[0].physicalIdentityDiagnostics[0];
+        demand(d.branch==Branch::MappingAgreementA&&d.presenceMask==6&&d.mismatchBits==physicalBit(M::MissingEntry)&&!d.entry.present
+            &&d.physical.present&&d.indexed.present,"missing entry was guessed into a captured region");
+        pass("PhysicalIdentity branch A distinguishes missing Playlist entry from present physical/indexed sources without classifying the voice");
+    }
+    {
+        SyntheticOwner owner;FLStandaloneSourceOverlay router(syntheticConfig(owner));auto model=syntheticModel();model->channels[1].nativeMixerInsert248=1;
+        const auto decoded=syntheticDecoded(*model,1);auto gate=std::make_shared<StandaloneCacheGate>();router.publish("two",decoded,model,syntheticBatch("two",decoded,gate));
+        std::array<float,14> output;output.fill(marker);auto read=syntheticRead(*model,1,output.data()+1);read.nativeChannelIndex=model->channels[1].managerIndex;putSynthetic(read.nativeRecord,6,read.nativeChannelIndex);
+        demand(rtRead(router,read)==FLStandaloneOverlayOutcome::Rejected,"same-instance wrong indexed source fault changed");
+        const auto stats=router.instanceStatsOnModelThread();const auto& d=stats[0].physicalIdentityDiagnostics[0];
+        demand(d.branch==Branch::MappingAgreementA&&d.presenceMask==7&&d.mismatchBits==physicalBit(M::EntryIndexedSource)
+            &&d.entry.sourceAddress==d.physical.sourceAddress&&d.entry.sourceAddress!=d.indexed.sourceAddress
+            &&d.entry.expected.nativeChannelIndex==3&&d.indexed.expected.nativeChannelIndex==4
+            &&d.indexed.expected.capturedManagerMemberObject==model->channels[1].channelObject,"different indexed cached source/model manager was not retained separately");
+        router.shutdownAtNativeBoundary();pass("PhysicalIdentity branch A preserves differing entry/physical/indexed protected sources and their own captured-manager numeric identities");
+    }
+    {
+        OfflineFixture f;auto read=f.read();++read.sampleObject;const auto output=f.output;
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Rejected&&f.output==output,"late sample physical fault changed");
+        const auto stats=f.router.instanceStatsOnModelThread();const auto& d=stats[0].physicalIdentityDiagnostics[0];
+        demand(d.branch==Branch::ObservedPhysicalSourceB&&d.presenceMask==7&&d.agreementMask==63&&d.mismatchBits==physicalBit(M::SampleObject)
+            &&d.observed.sampleObject==read.sampleObject&&d.entry.expected.sampleObject==f.model->sources[0].waveSampleObject
+            &&d.entry.expected.sampleObject!=d.observed.sampleObject,"late actual POD mismatch not distinguished from mapping fault");
+        pass("PhysicalIdentity branch B records exact observed-versus-captured sample mismatch with all mapping candidates agreeing and unchanged output");
+    }
+    {
+        OfflineFixture f;auto read=f.read();read.nativeMixerInsert=17;read.voiceObject=0;read.readerObject=0;
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Rejected,"late missing-object/mixer physical fault changed");
+        const auto stats=f.router.instanceStatsOnModelThread();const auto& d=stats[0].physicalIdentityDiagnostics[0];
+        demand(d.branch==Branch::ObservedPhysicalSourceB&&d.mismatchBits==(physicalBit(M::MissingVoice)|physicalBit(M::MissingReader)|physicalBit(M::MixerInsert))
+            &&d.entry.nativeMixerInsert==1&&d.observed.nativeMixerInsert==17,"late physical mismatch bit set lost a compared predicate");
+        pass("PhysicalIdentity branch B retains distinct missing voice/reader and actual-versus-expected mixer values without changing guards");
+    }
+    {
+        OfflineFixture f;auto read=f.read();read.voiceVMT++;
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Rejected&&f.router.instanceStatsOnModelThread()[0].physicalIdentityDiagnosticReadyMask==0,"nonphysical class refusal consumed first-physical slots");
+        pass("non-PhysicalIdentity refusals leave all first-physical diagnostic slots untouched");
+    }
+}
+void fixedPhysicalDiagnosticControls(){
+    using Branch=FLStandalonePhysicalIdentityBranch;
+    OfflineFixture f;FLStandaloneSourceOverlayOfflineAccess::seedUnrelatedLegacyCountersNearWrap(f.router);
+    for(unsigned i=1;i<=4;++i){auto read=f.read();read.sampleObject+=i;read.preOriginalReaderPosition=double(i);
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Rejected,"diagnostic reservation changed a physical refusal");
+        const auto stats=f.router.instanceStatsOnModelThread();demand(stats[0].physicalIdentityDiagnosticReadyMask==((1u<<i)-1)
+            &&!stats[0].physicalIdentityDiagnosticOverflow,"first-four reservation wrapped or overflowed early");
+        for(unsigned j=0;j<i;++j)demand(stats[0].physicalIdentityDiagnostics[j].slotIndex==j&&stats[0].physicalIdentityDiagnostics[j].observed.preOriginalReaderPosition==double(j+1),"published slot was mixed or overwritten");
+        f.router.takeFaultsOnModelThread();
+    }
+    for(unsigned i=0;i<1030;++i){auto read=f.read();read.sampleObject+=100+i;read.preOriginalReaderPosition=5000+i;
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Rejected,"full diagnostic mailbox altered source refusal");}
+    auto stats=f.router.instanceStatsOnModelThread();demand(stats[0].physicalIdentityDiagnosticReadyMask==15&&stats[0].physicalIdentityDiagnosticOverflow,"full four-slot mailbox did not fail quietly");
+    for(unsigned j=0;j<4;++j)demand(stats[0].physicalIdentityDiagnostics[j].observed.preOriginalReaderPosition==double(j+1)
+        &&stats[0].physicalIdentityDiagnostics[j].branch==Branch::ObservedPhysicalSourceB,"overflow or unrelated legacy-counter wrap overwrote first four records");
+    f.router.takeFaultsOnModelThread();f.router.publish("mono",f.mono,f.model,syntheticBatch("mono",f.mono,f.monoGate,2000));
+    stats=f.router.instanceStatsOnModelThread();demand(stats[0].physicalIdentityDiagnosticReadyMask==15&&stats[0].physicalIdentityDiagnosticOverflow,"new publication reset/re-armed diagnostic slots");
+    for(unsigned j=0;j<4;++j)demand(stats[0].physicalIdentityDiagnostics[j].observed.preOriginalReaderPosition==double(j+1),"later publication changed lifetime-Control diagnostic content");
+    pass("first four immutable diagnostics survive more than 1024 overflow attempts, seeded legacy-counter wrap, fault drains and cache republication without slot reuse");
+}
+void concurrentPhysicalDiagnosticControls(){
+    OfflineFixture f;std::atomic<unsigned> finished{0};std::atomic<bool> begin{false},bad{false};std::array<std::thread,4> workers;
+    for(unsigned worker=0;worker<workers.size();++worker)workers[worker]=std::thread([&,worker]{while(!begin.load())std::this_thread::yield();overlayOfflineRT=true;
+        for(unsigned i=1;i<=64;++i){const unsigned markerValue=worker*1000+i;auto read=f.read();read.voiceObject=0xa00000+markerValue;read.readerObject=0xa10000+markerValue;
+            read.sampleObject+=markerValue;read.preOriginalReaderPosition=markerValue;
+            if(f.router.processObservedAfterOriginal(read)!=FLStandaloneOverlayOutcome::Rejected)bad=true;}
+        overlayOfflineRT=false;finished.fetch_add(1);});
+    begin=true;unsigned snapshots=0;
+    do{const auto stats=f.router.instanceStatsOnModelThread();for(unsigned i=0;i<4;++i)if(stats[0].physicalIdentityDiagnosticReadyMask&(1u<<i)){
+            const auto& d=stats[0].physicalIdentityDiagnostics[i];const auto markerValue=static_cast<std::uintptr_t>(d.observed.preOriginalReaderPosition);
+            demand(d.slotIndex==i&&markerValue&&d.observed.voiceObject==0xa00000+markerValue&&d.observed.readerObject==0xa10000+markerValue
+                &&d.observed.sampleObject==d.entry.expected.sampleObject+markerValue&&d.presenceMask==7&&d.agreementMask==63
+                &&d.entry.captureSerial==d.captureSerial&&d.entry.batchAddress==d.ownerBatchAddress,"acquire read observed a mixed/incomplete immutable diagnostic");}
+        ++snapshots;
+    }while(finished.load()!=workers.size());
+    for(auto& worker:workers)worker.join();const auto stats=f.router.instanceStatsOnModelThread();
+    demand(!bad&&snapshots&&stats[0].physicalIdentityDiagnosticReadyMask==15&&stats[0].physicalIdentityDiagnosticOverflow&&overlayOfflineRTAllocations.load()==0,"concurrent fixed-slot writer/status snapshot failed or allocated RT");
+    pass("concurrent first-four writers and acquire-only status snapshots expose no mixed POD and overflow without any RT allocation or reset");
+}
+void retiredPhysicalDiagnosticControls(){
+    OfflineFixture f;const auto readModelAddress=reinterpret_cast<std::uintptr_t>(f.model.get());std::weak_ptr<const FLNativeModelSnapshot> lifetime=f.model;
+    auto read=f.read();read.sampleObject+=16;overlayOfflineRT=true;const auto* borrowed=FLStandaloneSourceOverlayOfflineAccess::borrow(f.router);overlayOfflineRT=false;
+    f.router.invalidateInstance("mono");f.router.removeDisabledInstanceOnModelThread("mono");f.model.reset();
+    demand(!lifetime.expired()&&FLStandaloneSourceOverlayOfflineAccess::retiredCount(f.router)==1,"protected retired model vanished before diagnostic copy");
+    overlayOfflineRT=true;FLStandaloneSourceOverlayOfflineAccess::diagnoseBorrowedTable(f.router,borrowed,read);FLStandaloneSourceOverlayOfflineAccess::release(f.router);overlayOfflineRT=false;
+    f.router.collectRetiredOnModelThread();demand(lifetime.expired(),"diagnostic retained model/batch pointers instead of numeric copies");
+    const auto stats=f.router.instanceStatsOnModelThread();const auto& d=stats[0].physicalIdentityDiagnostics[0];
+    demand(!stats[0].published&&stats[0].physicalIdentityDiagnosticReadyMask==1&&d.entry.expected.capturedModelAddress==readModelAddress
+        &&d.observed.sampleObject==d.entry.expected.sampleObject+16&&overlayOfflineRTAllocations.load()==0,"retired-table diagnostic was lost or dereferenced after source/model release");
+    pass("ReaderGuard-protected retired table yields copied numeric provenance; later status survives model destruction without retaining or dereferencing those addresses");
+}
 void forwardingControl(){
     struct NativeCall{unsigned calls=0;std::uintptr_t enabled=0;void* context=nullptr;double readerPosition=17,voiceSnapshot=-1;std::array<float,8> values{};}native;
     auto original=+[](void* self,std::uintptr_t enabled,void* context,float** output,std::int32_t* count,std::uint8_t* ended,std::uint8_t* changed){
@@ -1025,7 +1240,7 @@ void disabledTeardownControls(){
     }
 }
 int sourceOverlayOfflineMain(){
-    positiveControls();zeroControls();staleHoldControls();negativeControls();publicationControls();observedChannelClassControls();forwardingControl();concurrentLifecycleControl();disabledTeardownControls();
+    positiveControls();zeroControls();staleHoldControls();negativeControls();publicationControls();observedChannelClassControls();physicalDiagnosticBranchControls();fixedPhysicalDiagnosticControls();concurrentPhysicalDiagnosticControls();retiredPhysicalDiagnosticControls();forwardingControl();concurrentLifecycleControl();disabledTeardownControls();
     std::cout<<"{\"schema\":\"rysup.standalone-fl.source-overlay-offline/1\",\"pass\":true,\"checks\":"<<passed.size()
         <<",\"synthetic_inputs\":true,\"native_engine_loaded\":false,\"native_hook_installed\":false,\"third_party_runtime_qualified\":false,\"rt_allocations\":"<<overlayOfflineRTAllocations.load()<<",\"controls\":[";
     for(std::size_t i=0;i<passed.size();++i){if(i)std::cout<<',';std::cout<<'"'<<passed[i]<<'"';}std::cout<<"]}\n";return 0;

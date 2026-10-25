@@ -22,6 +22,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <new>
+#include <mutex>
 
 namespace rysup::fl_ara { namespace {
 constexpr const char* exeSHA="5be78aa9f9f066f3b28747b48357769b70979e859b42661f2af7163f08e57aab";
@@ -33,6 +34,8 @@ struct State {
     std::string testDeviceUID;std::atomic<bool> enabled{false};
     std::atomic<test_output::FLTestOutputSink*> testSink{nullptr};
     std::atomic<std::uint64_t> permittedDeviceStarts{0},refusedDeviceStarts{0};
+    std::mutex outputStartDiagnosticMutex;
+    NativeOutputStartDiagnostic outputStartDiagnostic;
 };
 State& state(){static State value;return value;}
 std::string canonical(const char* p){char value[PATH_MAX];return p&&realpath(p,value)?value:"";}
@@ -157,12 +160,19 @@ void* observedDlsym(void* handle,const char* name){void* result=dlsym(handle,nam
     if(originalCreate&&originalCreate!=(Create)result)return result;originalCreate=(Create)result;return (void*)nativeCreate;
 }
 bool testAudioRequested()noexcept{return getenv("RYSUP_FLARA_TEST_AUDIO_DEVICE_UID")!=nullptr;}
-bool permittedDevice(AudioDeviceID device)noexcept{auto& s=state();if(!testAudioRequested())return true;
+bool permittedDevice(AudioDeviceID device,NativeOutputStartDiagnostic* diagnostic=nullptr)noexcept{auto& s=state();if(!testAudioRequested())return true;
     if(!s.enabled.load()||s.testDeviceUID!="Pro Tools Audio Bridge 2-A_UID"){s.refusedDeviceStarts.fetch_add(1);return false;}
     AudioObjectPropertyAddress uidAddress{kAudioDevicePropertyDeviceUID,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};CFStringRef uid=nullptr;UInt32 size=sizeof(uid);
     AudioObjectPropertyAddress transportAddress{kAudioDevicePropertyTransportType,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};UInt32 transport=0,transportSize=sizeof(transport);
-    bool okay=AudioObjectGetPropertyData(device,&uidAddress,0,nullptr,&size,&uid)==noErr&&uid&&size==sizeof(uid)&&AudioObjectGetPropertyData(device,&transportAddress,0,nullptr,&transportSize,&transport)==noErr&&transport==kAudioDeviceTransportTypeVirtual;
-    if(okay){char value[2048];okay=CFStringGetCString(uid,value,sizeof(value),kCFStringEncodingUTF8)&&s.testDeviceUID==value;}if(uid)CFRelease(uid);
+    const auto uidStatus=AudioObjectGetPropertyData(device,&uidAddress,0,nullptr,&size,&uid);
+    const bool validUID=uidStatus==noErr&&uid&&size==sizeof(uid);
+    bool uidMatched=false;if(validUID){char value[2048];uidMatched=CFStringGetCString(uid,value,sizeof(value),kCFStringEncodingUTF8)&&s.testDeviceUID==value;}
+    OSStatus transportStatus=0;const bool transportAttempted=validUID;
+    if(transportAttempted)transportStatus=AudioObjectGetPropertyData(device,&transportAddress,0,nullptr,&transportSize,&transport);
+    const bool virtualMatched=transportAttempted&&transportStatus==noErr&&transportSize==sizeof(transport)&&transport==kAudioDeviceTransportTypeVirtual;
+    if(diagnostic){diagnostic->deviceID=device;diagnostic->uidReadAttempted=true;diagnostic->uidStatus=uidStatus;diagnostic->uidBytes=size;diagnostic->uidMatched=uidMatched;
+        diagnostic->transportReadAttempted=transportAttempted;diagnostic->transportStatus=transportStatus;diagnostic->transportBytes=transportSize;diagnostic->virtualTransportMatched=virtualMatched;}
+    const bool okay=validUID&&uidMatched&&virtualMatched;if(uid)CFRelease(uid);
     if(okay)s.permittedDeviceStarts.fetch_add(1);else s.refusedDeviceStarts.fetch_add(1);return okay;
 }
 OSStatus observedDeviceStart(AudioDeviceID device,AudioDeviceIOProcID callback){
@@ -180,12 +190,23 @@ OSStatus observedUnitSetProperty(AudioUnit unit,AudioUnitPropertyID property,Aud
         return sink->observedSetProperty(unit,property,scope,element,data,bytes);
     return AudioUnitSetProperty(unit,property,scope,element,data,bytes);
 }
+void recordOutputStart(NativeOutputStartDiagnostic diagnostic)noexcept{
+    // Neither this function nor snapshotting runs in the render callback.
+    try{auto& s=state();std::lock_guard<std::mutex> guard(s.outputStartDiagnosticMutex);
+        diagnostic.sequence=s.outputStartDiagnostic.sequence==UINT64_MAX?UINT64_MAX:s.outputStartDiagnostic.sequence+1;s.outputStartDiagnostic=diagnostic;}catch(...){}
+}
 OSStatus observedOutputStart(AudioUnit unit){auto& s=state();if(testAudioRequested()){
-    if(!s.enabled.load()||s.testDeviceUID!="Pro Tools Audio Bridge 2-A_UID"){s.refusedDeviceStarts.fetch_add(1);return kAudioHardwareIllegalOperationError;}
-    AudioDeviceID device=0;UInt32 size=sizeof(device);auto* sink=s.testSink.load(std::memory_order_acquire);
-    if(AudioUnitGetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,0,&device,&size)
-        ||size!=sizeof(device)||!permittedDevice(device)||!sink||!sink->tryPrepareMutedOutputStart(unit))
-        return kAudioHardwareIllegalOperationError;
+    NativeOutputStartDiagnostic diagnostic;
+    const auto refuse=[&](std::uint32_t stage){diagnostic.stage=stage;recordOutputStart(diagnostic);return kAudioHardwareIllegalOperationError;};
+    if(!s.enabled.load()||s.testDeviceUID!="Pro Tools Audio Bridge 2-A_UID"){s.refusedDeviceStarts.fetch_add(1);return refuse(1);}
+    AudioDeviceID device=0;UInt32 size=sizeof(device);
+    diagnostic.currentDeviceStatus=AudioUnitGetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,0,&device,&size);
+    diagnostic.deviceID=device;diagnostic.currentDeviceBytes=size;
+    if(diagnostic.currentDeviceStatus||size!=sizeof(device))return refuse(2);
+    if(!permittedDevice(device,&diagnostic))return refuse(3);
+    auto* sink=s.testSink.load(std::memory_order_acquire);if(!sink)return refuse(4);
+    if(!sink->tryPrepareMutedOutputStart(unit))return refuse(5);
+    diagnostic.originalInvoked=true;diagnostic.originalStatus=AudioOutputUnitStart(unit);diagnostic.stage=6;recordOutputStart(diagnostic);return diagnostic.originalStatus;
     }return AudioOutputUnitStart(unit);
 }
 bool testSinkAdmitted(void*)noexcept{return nativeApplicationAdmitted();}
@@ -225,6 +246,7 @@ bool initializeNativeApplication(const NativeApplicationCallbacks& callbacks)noe
         auto* sink=new(std::nothrow)test_output::FLTestOutputSink;
         test_output::Config config;config.exactAdmittedEnginePath=s.app.enginePath.c_str();config.exactTestDeviceUID=s.testDeviceUID.c_str();
         config.functions.currentlyAdmitted=testSinkAdmitted;config.functions.verifyExactTestDevice=testSinkDevice;
+        config.expectedOutputCallbackOffset=0xcd7bc0;
         if(!sink||!sink->initialize(config)){delete sink;s.enabled=false;return false;}
         // The output unit and every callback record are process-lifetime. Test
         // audio reaches genuine native rendering, then only the driver-facing
@@ -235,8 +257,10 @@ bool initializeNativeApplication(const NativeApplicationCallbacks& callbacks)noe
 }catch(...){return false;}}
 const NativeApplication& nativeApplication()noexcept{return state().app;}
 NativeAudioTestStats nativeAudioTestStats()noexcept{
-    NativeAudioTestStats out;auto* sink=state().testSink.load(std::memory_order_acquire);if(!sink)return out;
+    NativeAudioTestStats out;auto& s=state();try{std::lock_guard<std::mutex> guard(s.outputStartDiagnosticMutex);out.lastOutputStart=s.outputStartDiagnostic;}catch(...){}
+    auto* sink=s.testSink.load(std::memory_order_acquire);if(!sink)return out;
     const auto value=sink->snapshot();out.presentationMuteConfigured=true;
+    out.callbackCalls=value.callbackCalls;out.nonfiniteScratchSamples=value.nonfiniteScratchSamples;out.preparedUnits=value.preparedUnits;
     out.nativeRenderCalls=value.nativeRenderCalls;out.nativeRenderedFrames=value.nativeRenderedFrames;
     out.mutedFrames=value.mutedFrames;out.nonzeroScratchSamples=value.nonzeroScratchSamples;
     out.nativeErrors=value.nativeErrors;out.unsupportedCallbacks=value.unsupportedCallbacks;
@@ -244,7 +268,22 @@ NativeAudioTestStats nativeAudioTestStats()noexcept{
     out.returnedShapeFailures=value.returnedShapeFailures;out.counterOverflows=value.counterOverflows;
     out.startRefusals=value.startRefusals;out.registrationRefusals=value.registrationRefusals;
     out.writeOnlyCallbackPreparations=value.writeOnlyCallbackPreparations;
-    out.criticalPropertyDisarms=value.criticalPropertyDisarms;return out;
+    out.criticalPropertyDisarms=value.criticalPropertyDisarms;
+    const auto& registration=value.lastRegistration;auto& destination=out.lastRegistration;
+    destination.stage=static_cast<std::uint32_t>(registration.stage);destination.reason=static_cast<std::uint32_t>(registration.reason);
+    destination.property=registration.property;destination.scope=registration.scope;destination.element=registration.element;destination.bytes=registration.bytes;
+    destination.callbackSource=static_cast<std::uint32_t>(registration.callbackSource);destination.callbackImageOffset=registration.callbackImageOffset;
+    destination.sequence=registration.sequence;destination.dropped=registration.dropped;destination.originalStatus=registration.originalStatus;
+    destination.recordPresent=registration.recordPresent;destination.claimHeld=registration.claimHeld;destination.originalInvoked=registration.originalInvoked;destination.coherent=registration.coherent;
+    const auto& metadata=value.callbackMetadata;auto& output=out.callbackMetadata;
+    output.registeredScope=metadata.registeredScope;output.registeredElement=metadata.registeredElement;
+    output.routeGetterStatus=metadata.routeGetterStatus;output.routeGetterBytes=metadata.routeGetterBytes;
+    output.routeInfoStatus=metadata.routeInfoStatus;output.routeInfoBytes=metadata.routeInfoBytes;output.routeWritable=metadata.routeWritable;
+    output.inputGetterStatus=metadata.inputGetterStatus;output.inputGetterBytes=metadata.inputGetterBytes;
+    output.inputInfoStatus=metadata.inputInfoStatus;output.inputInfoBytes=metadata.inputInfoBytes;output.inputWritable=metadata.inputWritable;
+    output.outputAlias=metadata.outputAlias;output.accepted=metadata.accepted;output.coherent=metadata.coherent;
+    output.routeQueried=metadata.routeQueried;output.inputQueried=metadata.inputQueried;output.sequence=metadata.sequence;output.dropped=metadata.dropped;
+    return out;
 }
 bool nativeApplicationAdmitted()noexcept{
     // Parent identity is verified before enabling the bridge. A launcher that

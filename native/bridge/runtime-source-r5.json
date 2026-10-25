@@ -1,0 +1,45 @@
+{
+  "schema": "rysup.fl-ara-runtime-source-delta/1",
+  "candidate": "r5-output-scope",
+  "prior_runtime_source_manifest": "runtime-source-r4.json",
+  "upstream_source_freeze_sha256": "f149d74b24d148d521183f8f6d90106d964ca9de8af34f7cbc80d14bf18fcb3c",
+  "compile_manifest_sha256": "93759dd6744482d18374301ad34cef2d310894b3267b0027033726b23c6d29c0",
+  "compiled_artifact_verification_sha256": "98bccd27b5c153d65730a412d5f5279792e4ca1883392de05175745adc54075e",
+  "compiled_helper_original_sha256": "33c55342aba90e5aedadb78103402d92a767a23de189cd115daba20182ebd0a5",
+  "runtime_qualified": false,
+  "sdk_source_imported": false,
+  "vendor_binary_or_audio_imported": false,
+  "private_qa_static_review_imported": false,
+  "files": [
+    {
+      "path": "native/bridge/native/FLAppBridge.mm",
+      "previous_sha256": "4416c117194b9a867746dfe5275d4b593bfb08834f5793d90737118c5d747a64",
+      "sha256": "9ec59636e4eddc710c4332e15e79170f3ead59b8425abb03502b227d12d1a5e8",
+      "bytes": 99078
+    },
+    {
+      "path": "native/bridge/native/FLNativeApplication.mm",
+      "previous_sha256": "4970870fecd45cc3fa1d24f9b5315e1a53f8b5577d822a1b850e8d1b5f6bebad",
+      "sha256": "6baf5d8c27416f1ee33d02577fad9b6270fb5e837fdd635853b9407083ae19cc",
+      "bytes": 30925
+    },
+    {
+      "path": "native/bridge/native/FLTestOutputSink.cpp",
+      "previous_sha256": "2099cd788bf41f3913dc94926888d7b3d79ff43bae0ee640c1a7fc7344c0bcda",
+      "sha256": "9d2405bb3876de440bfcb258a4ac9dff8059ea1dcaa560325f3d65594b9e1daa",
+      "bytes": 24638
+    },
+    {
+      "path": "native/bridge/native/FLNativeApplication.h",
+      "previous_sha256": "d8dfdf9f9dba1bac9065675e5c61747d8718e25312b6027c65a952b4e1d0bd98",
+      "sha256": "b1ddaabb2034acd29817451e4ed16e7aad184e45813f6801c015212a1431b35a",
+      "bytes": 5371
+    },
+    {
+      "path": "native/bridge/native/FLTestOutputSink.h",
+      "previous_sha256": "0c88c83377ae7ba06085ba197711593bbb152f9232ac156dd0dc27bf0cf50232",
+      "sha256": "f068426da870b2e4a49c7a9e146b6b1124b8d518ac56a6c5dd5f0c9082c2fc87",
+      "bytes": 7332
+    }
+  ]
+}

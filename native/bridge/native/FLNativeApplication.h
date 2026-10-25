@@ -19,12 +19,38 @@ struct NativeInsert {
     std::int32_t mixerInsert=-1;
     std::string evidence;
 };
+// Control-thread diagnostics only. These numeric observations are not a
+// transactional device-state guarantee and never expose device UID strings.
+struct NativeOutputStartDiagnostic {
+    std::uint64_t sequence=0;
+    std::uint32_t stage=0,deviceID=0,currentDeviceBytes=0,uidBytes=0,transportBytes=0;
+    std::int32_t currentDeviceStatus=0,uidStatus=0,transportStatus=0,originalStatus=0;
+    bool uidReadAttempted=false,transportReadAttempted=false;
+    bool uidMatched=false,virtualTransportMatched=false,originalInvoked=false;
+};
+struct NativeOutputRegistrationDiagnostic {
+    std::uint32_t stage=0,reason=0,property=0,scope=0,element=0,bytes=0,callbackSource=0;
+    std::uint64_t callbackImageOffset=0,sequence=0,dropped=0;
+    std::int32_t originalStatus=0;
+    bool recordPresent=false,claimHeld=false,originalInvoked=false,coherent=false;
+};
+struct NativeOutputCallbackMetadataDiagnostic {
+    std::uint32_t registeredScope=0,registeredElement=0;
+    std::int32_t routeGetterStatus=0,routeInfoStatus=0,inputGetterStatus=0,inputInfoStatus=0;
+    std::uint32_t routeGetterBytes=0,routeInfoBytes=0,inputGetterBytes=0,inputInfoBytes=0;
+    bool routeWritable=false,inputWritable=false,outputAlias=false,accepted=false,coherent=false,routeQueried=false,inputQueried=false;
+    std::uint64_t sequence=0,dropped=0;
+};
 struct NativeAudioTestStats {
     bool presentationMuteConfigured=false;
+    std::uint64_t callbackCalls=0,nonfiniteScratchSamples=0,preparedUnits=0;
     std::uint64_t nativeRenderCalls=0,nativeRenderedFrames=0,mutedFrames=0,nonzeroScratchSamples=0;
     std::uint64_t nativeErrors=0,unsupportedCallbacks=0,concurrentCallbacks=0;
     std::uint64_t unsafeHardwareBuffers=0,returnedShapeFailures=0,counterOverflows=0;
     std::uint64_t startRefusals=0,registrationRefusals=0,writeOnlyCallbackPreparations=0,criticalPropertyDisarms=0;
+    NativeOutputStartDiagnostic lastOutputStart;
+    NativeOutputRegistrationDiagnostic lastRegistration;
+    NativeOutputCallbackMetadataDiagnostic callbackMetadata;
 };
 struct NativeApplicationCallbacks {
     void (*admitted)(const NativeApplication&,void*) noexcept=nullptr;

@@ -18,8 +18,11 @@ APIs; the function table permits synthetic tests without an actual audio unit.
 In explicitly enabled QA mode, route the AudioUnitSetProperty interposer through
 `sink.observedSetProperty(unit, property, scope, element, data, size)`. It forwards
 unrelated properties and non-output components unchanged, once. It wraps only
-SetRenderCallback/Input/0 on a public AudioComponent of output type, requiring
+SetRenderCallback/Input/0 or the sealed native FL Output/0 route on a public
+AudioComponent of output type, requiring
 the native callback's canonical dladdr image path to equal the admitted engine.
+The actual FL profile also pins the callback's engine-relative offset to
+`0xcd7bc0`. A zero offset is reserved for independent synthetic/metadata profiles.
 No instructions, executable memory, JIT code or callback ABI changes are used.
 There are eight fixed process-lifetime records, each with 128 KiB scratch. A
 record is never reused for a different callback/refcon; unsupported replacement
@@ -46,6 +49,22 @@ scope revokes the witness and disarms the record. Unsupported output callback
 scopes are refused rather than forwarded. The owner must route every relevant callback setter
 through the interposer; an unobserved bypass cannot be introspected with this
 write-only public API.
+
+The native Output/0 route keeps its exact successful setter witness. Its getter
+must return InvalidScope (-10866) with 16 bytes, and property info must return
+InvalidScope with zero bytes and writable=false. Preparation then requires
+Input/0 getter InvalidProperty (-10879) with zero bytes and successful Input/0
+property info with 16 bytes and writable=true. Every different status, size or
+writable result is refused. This is metadata alias admission, not callback
+readback. The record retains its original scope/element; route changes are
+refused. Exact Apple output identity, engine callback, test-device UID, 48 kHz
+client format and maximum-slice checks remain mandatory before Start.
+
+Status includes fixed numeric registration, metadata and output-start snapshots,
+with coherent sequence and dropped-update indicators. They describe admission
+steps and expose no callback pointers, refcons, paths or audio. An accepted
+metadata snapshot alone does not prove that later device/format guards passed,
+that Start succeeded, or that native rendering occurred.
 
 Observed changes to CurrentDevice, StreamFormat, MaximumFramesPerSlice,
 EnableIO, channel map/layout and element count disarm an existing record before
@@ -74,7 +93,7 @@ Such a failure is not successful physical-mute evidence. Accepted stream shape
 and maximum-slice checks happen before Start, and an actual QA run must have
 zero unsafe/unsupported/concurrent/native-error/returned-shape/overflow counts.
 
-`snapshot()` returns independent monotonic numeric counters only: callbacks,
+`snapshot()` returns fixed numeric diagnostics and independent monotonic counters: callbacks,
 native render calls/frames, nonzero/nonfinite scratch samples, muted frames and
 explicit registration/start/RT failures. Counter updates make one bounded CAS
 attempt; under concurrent device activity totals are lower bounds. Saturation

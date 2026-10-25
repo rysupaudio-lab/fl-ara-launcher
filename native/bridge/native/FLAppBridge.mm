@@ -906,6 +906,29 @@ void status(){
         @"native_errors":@(audioTest.nativeErrors),@"unsupported_callbacks":@(audioTest.unsupportedCallbacks),@"concurrent_callbacks":@(audioTest.concurrentCallbacks),
         @"unsafe_hardware_buffers":@(audioTest.unsafeHardwareBuffers),@"returned_shape_failures":@(audioTest.returnedShapeFailures),@"counter_overflows":@(audioTest.counterOverflows),
         @"start_refusals":@(audioTest.startRefusals),@"registration_refusals":@(audioTest.registrationRefusals),@"write_only_callback_preparations":@(audioTest.writeOnlyCallbackPreparations),@"critical_property_disarms":@(audioTest.criticalPropertyDisarms),@"configuration_is_render_proof":@NO};
+    NSMutableDictionary* presentation=[data[@"native_audio_test_presentation"] mutableCopy];
+    presentation[@"callback_calls"]=@(audioTest.callbackCalls);presentation[@"native_nonfinite_scratch_samples"]=@(audioTest.nonfiniteScratchSamples);presentation[@"prepared_units"]=@(audioTest.preparedUnits);
+    const auto& outputStart=audioTest.lastOutputStart;
+    presentation[@"last_output_start"]=@{@"sequence":@(outputStart.sequence),@"stage":@(outputStart.stage),@"device_id":@(outputStart.deviceID),
+        @"current_device_status":@(outputStart.currentDeviceStatus),@"current_device_bytes":@(outputStart.currentDeviceBytes),
+        @"uid_read_attempted":@(outputStart.uidReadAttempted),@"uid_status":@(outputStart.uidStatus),@"uid_bytes":@(outputStart.uidBytes),@"uid_matched":@(outputStart.uidMatched),
+        @"transport_read_attempted":@(outputStart.transportReadAttempted),@"transport_status":@(outputStart.transportStatus),@"transport_bytes":@(outputStart.transportBytes),@"virtual_transport_matched":@(outputStart.virtualTransportMatched),
+        @"original_invoked":@(outputStart.originalInvoked),@"original_status":@(outputStart.originalStatus)};
+    const auto& outputRegistration=audioTest.lastRegistration;
+    presentation[@"last_registration"]=@{@"stage":@(outputRegistration.stage),@"reason":@(outputRegistration.reason),@"property":@(outputRegistration.property),
+        @"scope":@(outputRegistration.scope),@"element":@(outputRegistration.element),@"bytes":@(outputRegistration.bytes),
+        @"callback_source":@(outputRegistration.callbackSource),@"callback_image_offset":@(outputRegistration.callbackImageOffset),
+        @"original_status":@(outputRegistration.originalStatus),@"record_present":@(outputRegistration.recordPresent),@"claim_held":@(outputRegistration.claimHeld),
+        @"original_invoked":@(outputRegistration.originalInvoked),@"coherent":@(outputRegistration.coherent),@"sequence":@(outputRegistration.sequence),@"dropped":@(outputRegistration.dropped)};
+    const auto& callbackMetadata=audioTest.callbackMetadata;
+    presentation[@"callback_metadata"]=@{@"registered_scope":@(callbackMetadata.registeredScope),@"registered_element":@(callbackMetadata.registeredElement),
+        @"route_getter_status":@(callbackMetadata.routeGetterStatus),@"route_getter_bytes":@(callbackMetadata.routeGetterBytes),
+        @"route_info_status":@(callbackMetadata.routeInfoStatus),@"route_info_bytes":@(callbackMetadata.routeInfoBytes),@"route_writable":@(callbackMetadata.routeWritable),
+        @"input_getter_status":@(callbackMetadata.inputGetterStatus),@"input_getter_bytes":@(callbackMetadata.inputGetterBytes),
+        @"input_info_status":@(callbackMetadata.inputInfoStatus),@"input_info_bytes":@(callbackMetadata.inputInfoBytes),@"input_writable":@(callbackMetadata.inputWritable),
+        @"output_alias":@(callbackMetadata.outputAlias),@"accepted":@(callbackMetadata.accepted),@"coherent":@(callbackMetadata.coherent),
+        @"route_queried":@(callbackMetadata.routeQueried),@"input_queried":@(callbackMetadata.inputQueried),@"sequence":@(callbackMetadata.sequence),@"dropped":@(callbackMetadata.dropped)};
+    data[@"native_audio_test_presentation"]=presentation;
     data[@"admitted_source_profile"]=@{@"sample_rate":@48000,@"channels":@[@1,@2],@"maximum_source_seconds":@300,
         @"maximum_pcm_bytes_per_source":@(64u*1024u*1024u),@"maximum_pcm_bytes_total":@(128u*1024u*1024u),
         @"maximum_source_cache_bytes":@(256u*1024u*1024u),@"reported_latency_head_tail_must_be_zero":@YES,@"limits_are_not_runtime_coverage":@YES};

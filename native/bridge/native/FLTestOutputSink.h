@@ -26,6 +26,33 @@ struct Config {
     const char* exactAdmittedEnginePath=nullptr;
     const char* exactTestDeviceUID=nullptr; // must equal Pro Tools Audio Bridge 2-A_UID
     Functions functions{};
+    // Actual sealed FL profile supplies 0xcd7bc0. Zero is reserved for the
+    // independent synthetic/AUHAL metadata profiles, not FL runtime admission.
+    std::uint64_t expectedOutputCallbackOffset=0;
+};
+enum class RegistrationStage:std::uint32_t {None=0,RefusedBeforeOriginal=1,OriginalFailed=2,Registered=3,Removed=4};
+enum class RegistrationReason:std::uint32_t {
+    None=0,NotInitialized=1,NotAdmitted=2,ConfigurationBusy=3,UnsupportedScope=4,
+    UnsupportedElement=5,MissingData=6,WrongDataBytes=7,SelfCallback=8,NoCallbackImage=9,
+    CallbackPathUnresolved=10,CallbackNotEngine=11,CallbackChanged=12,RefconChanged=13,
+    RegistrationRouteChanged=14,PoolExhausted=15,OriginalSetterFailed=16,CallbackOffsetMismatch=17
+};
+enum class CallbackSource:std::uint32_t {NotInspected=0,ExactEngine=1,OwnedExecutable=2,OtherImage=3,NoImage=4,SelfWrapper=5};
+struct RegistrationDiagnostic {
+    RegistrationStage stage=RegistrationStage::None;
+    RegistrationReason reason=RegistrationReason::None;
+    std::uint32_t property=0,scope=0,element=0,bytes=0;
+    CallbackSource callbackSource=CallbackSource::NotInspected;
+    std::uint64_t callbackImageOffset=0,sequence=0,dropped=0;
+    OSStatus originalStatus=0;
+    bool recordPresent=false,claimHeld=false,originalInvoked=false,coherent=false;
+};
+struct CallbackMetadataDiagnostic {
+    std::uint32_t registeredScope=0,registeredElement=0;
+    OSStatus routeGetterStatus=0,routeInfoStatus=0,inputGetterStatus=0,inputInfoStatus=0;
+    std::uint32_t routeGetterBytes=0,routeInfoBytes=0,inputGetterBytes=0,inputInfoBytes=0;
+    bool routeWritable=false,inputWritable=false,outputAlias=false,accepted=false,coherent=false,routeQueried=false,inputQueried=false;
+    std::uint64_t sequence=0,dropped=0;
 };
 struct Stats {
     std::uint64_t callbackCalls=0,nativeRenderCalls=0,nativeRenderedFrames=0;
@@ -35,6 +62,8 @@ struct Stats {
     std::uint64_t registrationRefusals=0,startRefusals=0,preparedUnits=0;
     std::uint64_t writeOnlyCallbackPreparations=0;
     std::uint64_t criticalPropertyDisarms=0;
+    RegistrationDiagnostic lastRegistration{};
+    CallbackMetadataDiagnostic callbackMetadata{};
 };
 
 class FLTestOutputSink final {
@@ -62,6 +91,7 @@ private:
         FLTestOutputSink* owner=nullptr;
         AudioUnit unit=nullptr;
         AURenderCallbackStruct original{};
+        AudioUnitScope registeredScope=0;AudioUnitElement registeredElement=0;
         AudioStreamBasicDescription format{};
         UInt32 maximumSliceFrames=0;
         bool preparedBefore=false;
@@ -80,10 +110,21 @@ private:
     bool returnedShape(const Record&,UInt32) const noexcept;
     void inspectScratch(const Record&,UInt32) noexcept;
     void bump(unsigned,std::uint64_t=1) noexcept;
+    void publishRegistration(const RegistrationDiagnostic&) noexcept;
+    RegistrationDiagnostic registrationSnapshot() const noexcept;
+    void publishMetadata(const CallbackMetadataDiagnostic&) noexcept;
+    CallbackMetadataDiagnostic metadataSnapshot() const noexcept;
     Functions functions{};
     std::array<char,4096> enginePath{};
+    std::array<char,4096> ownedExecutablePath{};
+    std::uint64_t expectedOutputCallbackOffset=0;
     std::array<Record,maximumUnits> records{};
     std::array<std::atomic<std::uint64_t>,17> counters{};
     std::atomic<bool> initialized{false},configuring{false};
+    std::atomic<bool> diagnosticPublishing{false};
+    std::atomic<std::uint64_t> diagnosticSequence{0},diagnosticDropped{0};
+    std::array<std::atomic<std::uint64_t>,10> diagnosticFields{};
+    std::atomic<std::uint64_t> metadataSequence{0};
+    std::array<std::atomic<std::uint64_t>,15> metadataFields{};
 };
 } // namespace rysup::fl_ara::test_output

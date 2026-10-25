@@ -204,7 +204,19 @@ func sourceLogicalBytes(_ source: URL) throws -> UInt64 {
     return bytes
 }
 func freeBytes(_ directory: URL) throws -> UInt64 { (try fm.attributesOfFileSystem(forPath: directory.path)[.systemFreeSize] as? NSNumber)?.uint64Value ?? 0 }
+// This exact supported vendor build reads template sidecars through an FPC Text
+// filename buffer of 255 UTF-16 units. Its longest bundled template .nfo suffix,
+// including the leading slash after the app path, is 103 units.
+let longestTemplateSidecarSuffixUnits = 103
+func validatePrivateAppPath(_ physicalAppPath: String) throws {
+    let total = physicalAppPath.utf16.count + longestTemplateSidecarSuffixUnits
+    guard total <= 255 else {
+        throw fail("The private FL app location is too long for this FL build's template reader (\(total)/255 UTF-16 units). Choose a shorter real --cache-root location; symlinks and automatic fallback locations are not used.")
+    }
+}
 func copyPrivateApp(_ source: URL, to destination: URL, cache: URL) throws -> String {
+    // Refuse before examining copy inputs or creating any vendor app payload.
+    try validatePrivateAppPath(physicalPath(destination))
     let reserve: UInt64 = 5 * 1024 * 1024 * 1024
     let fromFS = try fm.attributesOfFileSystem(forPath: source.path)[.systemNumber] as? NSNumber
     let toFS = try fm.attributesOfFileSystem(forPath: cache.path)[.systemNumber] as? NSNumber
@@ -520,6 +532,25 @@ func selfTest() throws {
     let base = fm.temporaryDirectory.appendingPathComponent("fl-ara-launcher-test-" + UUID().uuidString)
     try fm.createDirectory(at: base, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
     defer { try? fm.removeItem(at: base) }
+    let boundary = "/" + String(repeating: "a", count: 151)
+    try validatePrivateAppPath(boundary) // 152 + 103 == 255, inclusive.
+    let nonBMPBoundary = "/" + String(repeating: "a", count: 149) + "😀"
+    guard nonBMPBoundary.utf16.count == 152, nonBMPBoundary.count == 151 else { throw fail("UTF-16 boundary fixture is invalid.") }
+    try validatePrivateAppPath(nonBMPBoundary)
+    for path in [boundary + "a", nonBMPBoundary + "a"] {
+        do { try validatePrivateAppPath(path); throw fail("Overlong template path admitted.") }
+        catch let error as LaunchError { guard error.message.contains("256/255 UTF-16") else { throw error } }
+    }
+    var refusedCopy = base
+    while physicalPath(refusedCopy).utf16.count <= 152 { refusedCopy.appendPathComponent("long-cache-component") }
+    refusedCopy.appendPathComponent("FL Studio 2026.app")
+    do {
+        _ = try copyPrivateApp(base.appendingPathComponent("missing-source"), to: refusedCopy, cache: base.appendingPathComponent("missing-cache"))
+        throw fail("Overlong private copy was attempted.")
+    } catch let error as LaunchError {
+        guard error.message.contains("shorter real --cache-root"), !fm.fileExists(atPath: refusedCopy.path),
+              !fm.fileExists(atPath: base.appendingPathComponent("missing-source").path) else { throw error }
+    }
     let home = base.appendingPathComponent("home"), tmp = base.appendingPathComponent("tmp"), data = base.appendingPathComponent("data")
     try preparePrivateHome(home, tmp: tmp, userData: data)
     let xml = try String(contentsOf: home.appendingPathComponent("Library/Preferences/Image-Line/reg.xml"), encoding: .utf8)
@@ -585,7 +616,7 @@ func selfTest() throws {
           ![unchanged,userChanged,notOurs,unknown].contains(where: { $0.defaultWriteAuthorized }) else {
         throw fail("Default-handler preservation decision authorized a write or misclassified a user choice.")
     }
-    print("PASS private home; normal48k+test-only native device registry; exact process inventory; no license duplication; symlink refusal; denied source write; allowed owned-run write; SIP-safe helper trampoline; read-only default-handler decisions; actual owned exit78 and conservative cleanup controls. No FL process launched.")
+    print("PASS UTF-16 template path boundary/non-BMP/refuse-before-copy; private home; normal48k+test-only native device registry; exact process inventory; no license duplication; symlink refusal; denied source write; allowed owned-run write; SIP-safe helper trampoline; read-only default-handler decisions; actual owned exit78 and conservative cleanup controls. No FL process launched.")
 }
 var args = Array(CommandLine.arguments.dropFirst())
 if args.isEmpty || args == ["--gui"] {

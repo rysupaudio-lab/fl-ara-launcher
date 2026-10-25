@@ -97,7 +97,18 @@ runtime automation is activated by the offline checks.
 
 Use `--cache-root "/Volumes/Razer SSD/.../FLARALauncher"` or the absolute
 `RYSUP_FLARA_CACHE_ROOT` environment variable to select an external cache. The
-private normal-app registry seeds FL Studio26/Devices/Audio output Sample rate
+launcher rejects a private app location whose physical path plus the supported
+build's longest template sidecar suffix exceeds 255 UTF-16 units. FL's native
+template reader truncates longer filenames. Use a shorter real cache location,
+such as `/Volumes/Razer SSD/Rys Up Audio Archive/FL ARA`; no symlink or
+automatic fallback is used. The default cache is subject to the same check.
+Other bundled native text readers may need separate path qualification; this
+guard covers the observed template reader only.
+The supported bundle contains 831 `.nfo` files, with a longest app-relative suffix
+of 142 UTF-16 units. Keeping the app prefix at most 113 units also keeps all those
+paths within 255 units as a conservative planning measure. Use of the same
+limited reader for those other files has not been established.
+The private normal-app registry seeds FL Studio26/Devices/Audio output Sample rate
 (Type2) at48000. Only test mode adds Device name (Type2)
 `4Pro Tools Audio Bridge 2-A`; normal mode leaves the user's device unspecified.
 Neither branch changes global preferences or duplicates the original registry.

@@ -90,7 +90,7 @@ with tempfile.TemporaryDirectory(prefix="fl-ara-package-", dir=out) as scratch:
             "with an owned backed-up .flp project and the virtual test device.\n"
             "Do not copy this candidate over an installed FL or plugin.\n"
         )
-    elif manifest.get("candidate_kind") in {"full-compiled-device-gate-unqualified","full-compiled-cache-queue-and-process-admission-unqualified","diagnostic-only-setup-and-physical-identity"}:
+    elif manifest.get("candidate_kind") in {"full-compiled-device-gate-unqualified","full-compiled-cache-queue-and-process-admission-unqualified","diagnostic-only-setup-and-physical-identity","supported-setup-continuity-and-exact-default-preview-routing"}:
         instructions = (
             "OWNER-LOCAL NATIVE QUALIFICATION CANDIDATE. NOT A PUBLIC INSTALLER.\n\n"
             "The native device-start admission gate is compiled into this candidate.\n"
@@ -103,6 +103,8 @@ with tempfile.TemporaryDirectory(prefix="fl-ara-package-", dir=out) as scratch:
             instructions += "Strong process admission is compiled; actual cache stability and audio remain unqualified.\n"
         if manifest.get("diagnostic_only") is True:
             instructions += "This candidate adds bounded setup/physical-identity observations only. Guard logic is unchanged.\n"
+        if manifest.get("guard_logic_changed") is True:
+            instructions += "Functional setup-continuity and exact-default-preview routing changes are compiled; actual playback, export and native Save remain unqualified.\n"
     else:
         instructions = ordinary_instructions
     (staging / "Install and start.txt").write_text(instructions)

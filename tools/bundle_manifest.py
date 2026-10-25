@@ -26,7 +26,7 @@ def sanitized_manifest(raw, helper, root):
             raise ValueError('Routing-only candidate cannot claim runtime qualification')
         result.update(restrictions);result['intended_runtime_scope']=scope
     if 'candidate_kind' in raw:
-        kinds={'full-compiled-device-gate-unqualified','full-compiled-cache-queue-and-process-admission-unqualified','diagnostic-only-setup-and-physical-identity'}
+        kinds={'full-compiled-device-gate-unqualified','full-compiled-cache-queue-and-process-admission-unqualified','diagnostic-only-setup-and-physical-identity','supported-setup-continuity-and-exact-default-preview-routing'}
         if raw['candidate_kind'] not in kinds or raw.get('device_start_admission_compiled') is not True or raw.get('actual_audio_io_qualified') is not False:
             raise ValueError('Compiled device-gate candidate metadata is inconsistent')
         if raw.get('routing_only') is True or result['runtime_admission_scope']!='owned-qualification-candidate' or any(result[k] for k in FLAGS):
@@ -40,6 +40,10 @@ def sanitized_manifest(raw, helper, root):
             if raw.get('diagnostic_only') is not True or raw.get('guard_logic_changed') is not False or raw.get('strong_process_admission_compiled') is not True:
                 raise ValueError('Diagnostic-only candidate metadata is inconsistent')
             result.update(diagnostic_only=True,guard_logic_changed=False,strong_process_admission_compiled=True)
+        if raw['candidate_kind']=='supported-setup-continuity-and-exact-default-preview-routing':
+            if raw.get('diagnostic_only') is not False or raw.get('guard_logic_changed') is not True or raw.get('strong_process_admission_compiled') is not True:
+                raise ValueError('Functional setup/preview candidate metadata is inconsistent')
+            result.update(diagnostic_only=False,guard_logic_changed=True,strong_process_admission_compiled=True)
     revision=raw.get('source_revision')
     if revision is None:
         revision=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()

@@ -40,6 +40,10 @@ class PublicManifest(unittest.TestCase):
    observed=m.sanitized_manifest(diagnostic,helper,root);self.assertEqual(observed,m.sanitized_manifest(observed,helper,root));self.assertIs(observed['diagnostic_only'],True);self.assertIs(observed['guard_logic_changed'],False)
    for change in [{'diagnostic_only':False},{'guard_logic_changed':True},{'actual_audio_io_qualified':True}]:
     with self.assertRaises(ValueError):m.sanitized_manifest(dict(diagnostic,**change),helper,root)
+   functional=dict(raw,candidate_kind='supported-setup-continuity-and-exact-default-preview-routing',diagnostic_only=False,guard_logic_changed=True,strong_process_admission_compiled=True)
+   changed=m.sanitized_manifest(functional,helper,root);self.assertEqual(changed,m.sanitized_manifest(changed,helper,root));self.assertIs(changed['diagnostic_only'],False);self.assertIs(changed['guard_logic_changed'],True)
+   for change in [{'diagnostic_only':True},{'guard_logic_changed':False},{'actual_audio_io_qualified':True},{'normal_app_integration_qualified':True}]:
+    with self.assertRaises(ValueError):m.sanitized_manifest(dict(functional,**change),helper,root)
    for change in [{'actual_audio_io_qualified':True},{'device_start_admission_compiled':False},{'runtime_qualified':True},{'candidate_kind':'qualified'}]:
     with self.subTest(change=change):
      with self.assertRaises(ValueError):m.sanitized_manifest(dict(raw,**change),helper,root)

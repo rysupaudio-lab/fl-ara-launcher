@@ -5,6 +5,7 @@
 #include "FLStandaloneSourceOverlay.h"
 #include "FLNativeProcessObserver.h"
 #include "FLNativeMixBoundary.h"
+#include "FLNativeEditorSetupCachePolicy.h"
 #include "FLNativeSaveGuard.h"
 #include "RegistrationReadThrough.h"
 #include "../host/FLStandaloneGraphDecoder.h"
@@ -812,8 +813,15 @@ struct NativeSetupObservation {
 void setup(hooks::InstanceRecord& n,const Steinberg::Vst::ProcessSetup& setup,Steinberg::tresult result,const hooks::ThreadInfo& info,void*)noexcept{
     auto* r=record(n);if(!r)return;
     NativeSetupObservation diagnostic(*r,setup,result,info);
-    r->sampleRate=setup.sampleRate;r->setupQualified=result==kResultOk&&setup.sampleRate==48000&&setup.symbolicSampleSize==Steinberg::Vst::kSample32;r->dirty=true;
-    if(r->nativeCacheGate)r->nativeCacheGate->invalidate();
+    static_assert(Steinberg::Vst::kSample32==editor_setup_cache::nativeFloat32&&Steinberg::Vst::kRealtime==editor_setup_cache::nativeRealtime&&
+        Steinberg::Vst::kPrefetch==editor_setup_cache::nativePrefetch&&Steinberg::Vst::kOffline==editor_setup_cache::nativeOffline,"native setup policy must match the actual SDK constants");
+    // This record is bound only as EditorRenderer|EditorView. Full source PCM
+    // belongs to a separately owned playback companion, so a successful native
+    // buffer-size/process-mode transition does not itself change cache content.
+    const auto decision=editor_setup_cache::apply({result==kResultOk,setup.sampleRate,setup.symbolicSampleSize,setup.processMode,setup.maxSamplesPerBlock},
+        info.isMainThread&&!info.insideNativeProcess,r->sampleRate,r->setupQualified,r->dirty,r->nativeCacheGate.get(),
+        [&]()noexcept{return currentNativeCacheGenerationCoherent(*r);});
+    if(decision.action==editor_setup_cache::Action::PreserveCoherentSourceCache)return;
     if(!r->setupQualified||!info.isMainThread||!stopped()||currentNativeSaveTransaction())return;
     // The actual original setupProcessing has returned. Prime synchronously
     // before FL can start original processing, ONLY after the owned worker proves
@@ -903,7 +911,7 @@ NSDictionary* physicalObservedDiagnosticJSON(const lab::FLStandaloneSourceRead& 
         @"native_clip_id":@(v.nativeClipID),@"native_mixer_insert":@(v.nativeMixerInsert),@"native_channel_index":@(v.nativeChannelIndex),@"native_source_frames":@(v.nativeSourceFrames),
         @"pre_original_reader_position_read":@(v.preOriginalReaderPositionRead),@"native_format78":@(v.nativeFormat78),@"native_format79":@(v.nativeFormat79),@"reader_channels_a0":@(v.readerChannelsA0),
         @"reader_format_a1":@(v.readerFormatA1),@"reader_stride48":@(v.readerStride48),@"native_block_frames":@(v.nativeBlockFrames),@"original_read_frames":@(v.originalReadFrames),
-        @"native_interleaved_stereo":@(reinterpret_cast<std::uintptr_t>(v.nativeInterleavedStereo)),@"output_matches_actual_native_context":@(v.outputMatchesActualNativeContext),@"original_ended":@(v.originalEnded),@"original_changed":@(v.originalChanged),@"native_record":nativeRecordDiagnosticJSON(v.nativeRecord),@"native_rate":finiteDoubleDiagnosticJSON(v.nativeRate),@"native_rate_factor":finiteDoubleDiagnosticJSON(v.nativeRateFactor),@"reader_step":finiteDoubleDiagnosticJSON(v.readerStep),@"source_start_frame":finiteDoubleDiagnosticJSON(v.sourceStartFrame),@"pre_original_reader_position":finiteDoubleDiagnosticJSON(v.preOriginalReaderPosition)};}
+        @"global_preview_owner_read_coherent":@(v.globalPreviewOwnerReadCoherent),@"global_preview_channel_object":@(v.globalPreviewChannelObject),@"native_interleaved_stereo":@(reinterpret_cast<std::uintptr_t>(v.nativeInterleavedStereo)),@"output_matches_actual_native_context":@(v.outputMatchesActualNativeContext),@"original_ended":@(v.originalEnded),@"original_changed":@(v.originalChanged),@"native_record":nativeRecordDiagnosticJSON(v.nativeRecord),@"native_rate":finiteDoubleDiagnosticJSON(v.nativeRate),@"native_rate_factor":finiteDoubleDiagnosticJSON(v.nativeRateFactor),@"reader_step":finiteDoubleDiagnosticJSON(v.readerStep),@"source_start_frame":finiteDoubleDiagnosticJSON(v.sourceStartFrame),@"pre_original_reader_position":finiteDoubleDiagnosticJSON(v.preOriginalReaderPosition)};}
 NSDictionary* physicalIdentityDiagnosticJSON(const lab::FLStandalonePhysicalIdentityDiagnostic& v){return @{@"slot_index":@(v.slotIndex),@"mismatch_bits":@(v.mismatchBits),@"presence_mask":@(v.presenceMask),@"agreement_mask":@(v.agreementMask),
         @"matching_batch_count":@(v.matchingBatchCount),@"protected_table_address":@(v.protectedTableAddress),@"owner_batch_address":@(v.ownerBatchAddress),@"actual_native_component":@(v.actualNativeComponent),
         @"table_batch_count":@(v.tableBatchCount),@"table_region_count":@(v.tableRegionCount),@"table_pointer_channel_count":@(v.tablePointerChannelCount),@"table_indexed_channel_count":@(v.tableIndexedChannelCount),
@@ -1036,6 +1044,8 @@ bool status(){
         @"last_error":@(rt.nativeSaveError.c_str()),@"whole_file_runtime_save_proven":@NO};
     data[@"controller_state_association_checks_passed"]=@(rt.separateControllerAssociationsVerified);
     data[@"native_observed_state_dirty_requests_returned"]=@(rt.nativeObservedStateDirtyRequestsReturned);
+    const auto sourceGlobalCounters=rt.overlay?rt.overlay->counters():lab::FLStandaloneOverlayCounters{};
+    data[@"source_overlay_global_counters"]=@{@"qualified_preview_unrelated_callbacks":@(sourceGlobalCounters.qualifiedPreviewUnrelatedCallbacks)};
     data[@"source_overlay_installed"]=@(rt.overlayInstalled);data[@"inserts"]=inserts;data[@"error"]=@(rt.error.c_str());
     NSMutableArray* ownWindows=[NSMutableArray array];
     for(NSWindow* window in NSApp.windows){NSMutableDictionary* item=[NSMutableDictionary dictionary];

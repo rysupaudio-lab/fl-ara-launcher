@@ -78,6 +78,11 @@ struct FLStandaloneSourceRead {
     float* nativeInterleavedStereo=nullptr;
     bool outputMatchesActualNativeContext=false;
     std::uint8_t originalEnded=0,originalChanged=0;
+    // Independent sealed-engine singleton observation, bracketed by two bounded
+    // live reads at +0x1e36700. False on either failed, null or unequal read.
+    // This is role authority only, never Playlist/source/format authority.
+    bool globalPreviewOwnerReadCoherent=false;
+    std::uintptr_t globalPreviewChannelObject=0;
 };
 // One-shot, immutable diagnostics only. No pointer in these values is ever
 // dereferenced by a status reader. Expected fields are prepared off RT from the
@@ -141,6 +146,9 @@ struct FLStandaloneOverlayCounters {
     std::uint64_t faultBits=0;
     std::uint32_t readers=0;
     std::uint64_t heldCallbacks=0,heldFrames=0,staleHoldRequests=0;
+    // GLOBAL router evidence only, never attributed to any insert. Saturating,
+    // bounded best effort under contention; this is not audio qualification.
+    std::uint64_t qualifiedPreviewUnrelatedCallbacks=0;
 };
 struct FLStandaloneOverlayInstanceStats {
     std::string instanceID;

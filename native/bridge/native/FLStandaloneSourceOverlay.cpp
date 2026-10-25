@@ -30,6 +30,10 @@ constexpr std::uintptr_t sourceReadSlot=0x130,channelVMTOffset=0x1508640;
 // FLNativeModel validates the bounded FPC parent chain and retains ACTUAL vptr.
 // This is one observed derived class, not admission of arbitrary subclasses.
 constexpr std::uintptr_t observedAudioChannelVMTOffset=0x150c000;
+// Exact same sealed engine: init +0x30c274 constructs TPreviewChannel (VMT
+// +0x150c280), then +0x30c278..280 stores it at +0x1e36700. Native RenderSnd
+// playback uses this independent singleton, not the Playlist channel manager.
+constexpr std::uintptr_t previewChannelVMTOffset=0x150c280,globalPreviewChannelOffset=0x1e36700;
 constexpr std::uintptr_t sampleVMTOffset=0x146bb98,baseSampleVMTOffset=0x144f960;
 constexpr std::uintptr_t readerVMTOffset=0x1487358,blockFramesOffset=0x21a23b4;
 constexpr std::size_t maximumInstances=64,maximumRegions=100000,maximumChannels=4096;
@@ -98,6 +102,11 @@ bool boundedRead(std::uintptr_t source,void* destination,std::size_t bytes)noexc
 }
 template<class T>bool readAt(std::uintptr_t source,std::uintptr_t offset,T& value)noexcept{
     return source<=std::numeric_limits<std::uintptr_t>::max()-offset&&boundedRead(source+offset,&value,sizeof(value));
+}
+void recordDefaultPreviewOwnerObservation(FLStandaloneSourceRead& read,bool beforeOK,std::uintptr_t before,
+    bool afterOK,std::uintptr_t after)noexcept{
+    read.globalPreviewChannelObject=afterOK?after:0;
+    read.globalPreviewOwnerReadCoherent=beforeOK&&afterOK&&before&&before==after;
 }
 std::string canonical(const std::string& path){char buffer[4096];return !path.empty()&&realpath(path.c_str(),buffer)?buffer:"";}
 std::uint32_t big32(const std::uint8_t* p){return std::uint32_t(p[0])<<24|std::uint32_t(p[1])<<16|std::uint32_t(p[2])<<8|p[3];}
@@ -222,6 +231,7 @@ struct FLStandaloneSourceOverlay::Impl{
     std::map<std::string,std::shared_ptr<Control>> controls;
     std::unique_ptr<Table> current;std::vector<std::unique_ptr<Table>> retired;
     std::atomic<Table*> table{nullptr};std::atomic<std::uint32_t> readers{0};AtomicCounters totals;
+    std::atomic<std::uint64_t> qualifiedPreviewUnrelatedCallbacks{0};
     std::uintptr_t installedSlot=0;bool installed=false,shutDown=false;
     explicit Impl(FLStandaloneOverlayConfig c):config(std::move(c)){
         demand(config.actualEngineImageBase&&config.exactEngineArm64SliceSHA256==kFLStandaloneOverlayEngineArm64SHA256&&
@@ -481,16 +491,30 @@ struct FLStandaloneSourceOverlay::Impl{
         }
         return FLStandaloneOverlayOutcome::HeldForRebuild;
     }
+    void noteQualifiedPreviewUnrelated()noexcept{
+        // Global observation only. Four bounded CAS attempts, saturate rather
+        // than wrap. Contention can under-count; never authorizes a source/read.
+        auto value=qualifiedPreviewUnrelatedCallbacks.load(std::memory_order_relaxed);
+        for(unsigned attempt=0;attempt<4;++attempt){if(value==std::numeric_limits<std::uint64_t>::max())return;
+            if(qualifiedPreviewUnrelatedCallbacks.compare_exchange_strong(value,value+1,std::memory_order_relaxed,std::memory_order_relaxed))return;}
+    }
     FLStandaloneOverlayOutcome process(const FLStandaloneSourceRead& r)noexcept{
         ReaderGuard guard(readers);const auto* t=table.load(std::memory_order_seq_cst);if(!t)return FLStandaloneOverlayOutcome::Inactive;
         totals.calls.fetch_add(1);
         const Table::Entry* entry=nullptr;const Table::Channel* physical=nullptr;const Table::Channel* indexed=nullptr;
+        if(r.channelObject){auto ch=std::lower_bound(t->channelsByPointer.begin(),t->channelsByPointer.end(),r.channelObject,[](const auto& row,std::uintptr_t pointer){return row.source->channel<pointer;});
+            if(ch!=t->channelsByPointer.end()&&ch->source->channel==r.channelObject)physical=&*ch;}
+        // Exact non-Playlist role proof precedes borrowed clip/index aliases.
+        // A pointer present in ANY protected captured source is never exempted,
+        // even if its current class/global ownership appears replaced/recycled.
+        const bool independentlyOwnedPreview=!physical&&r.nativeObservationComplete&&r.voiceRecordRead&&r.voiceObject&&r.readerObject&&r.channelObject&&
+            r.voiceVMT==config.actualEngineImageBase+voiceVMTOffset&&r.channelVMT==config.actualEngineImageBase+previewChannelVMTOffset&&
+            r.globalPreviewOwnerReadCoherent&&r.globalPreviewChannelObject==r.channelObject;
+        if(independentlyOwnedPreview){totals.unrelated.fetch_add(1);noteQualifiedPreviewUnrelated();return FLStandaloneOverlayOutcome::Unrelated;}
         if(r.voiceRecordRead){auto it=std::lower_bound(t->regions.begin(),t->regions.end(),r.nativeClipID,[](const auto& row,std::int32_t id){return row.region->id<id;});
             if(it!=t->regions.end()&&it->region->id==r.nativeClipID)entry=&*it;
             auto ch=std::lower_bound(t->channelsByIndex.begin(),t->channelsByIndex.end(),r.nativeChannelIndex,[](const auto& row,std::uint16_t index){return row.source->channelIndex<index;});
             if(ch!=t->channelsByIndex.end()&&ch->source->channelIndex==r.nativeChannelIndex)indexed=&*ch;}
-        if(r.channelObject){auto ch=std::lower_bound(t->channelsByPointer.begin(),t->channelsByPointer.end(),r.channelObject,[](const auto& row,std::uintptr_t pointer){return row.source->channel<pointer;});
-            if(ch!=t->channelsByPointer.end()&&ch->source->channel==r.channelObject)physical=&*ch;}
         std::array<const Batch*,3> matches{};std::size_t count=0;
         const auto add=[&](const Batch* b){if(b&&std::find(matches.begin(),matches.begin()+count,b)==matches.begin()+count)matches[count++]=b;};
         add(entry?entry->batch:nullptr);add(physical?physical->batch:nullptr);add(indexed?indexed->batch:nullptr);
@@ -605,7 +629,8 @@ void FLStandaloneSourceOverlay::removeDisabledInstanceOnModelThread(const std::s
 }
 void FLStandaloneSourceOverlay::collectRetiredOnModelThread(){p->collect();}
 FLStandaloneOverlayOutcome FLStandaloneSourceOverlay::processObservedAfterOriginal(const FLStandaloneSourceRead& read)noexcept{return p->process(read);}
-FLStandaloneOverlayCounters FLStandaloneSourceOverlay::counters()const noexcept{return p->totals.snapshot(p->readers.load(std::memory_order_seq_cst));}
+FLStandaloneOverlayCounters FLStandaloneSourceOverlay::counters()const noexcept{auto result=p->totals.snapshot(p->readers.load(std::memory_order_seq_cst));
+    result.qualifiedPreviewUnrelatedCallbacks=p->qualifiedPreviewUnrelatedCallbacks.load(std::memory_order_relaxed);return result;}
 std::vector<FLStandaloneOverlayInstanceStats> FLStandaloneSourceOverlay::instanceStatsOnModelThread()const{
     p->requireMain();std::vector<FLStandaloneOverlayInstanceStats> rows;rows.reserve(p->controls.size());
     for(const auto& pair:p->controls){FLStandaloneOverlayInstanceStats row;row.instanceID=pair.first;row.counters=pair.second->counters.snapshot();
@@ -649,6 +674,8 @@ void FLStandaloneSourceOverlay::processNativeAfterOriginal(void* self,void* cont
     if(!p->table.load(std::memory_order_seq_cst))return;
     FLStandaloneSourceRead read;read.voiceObject=reinterpret_cast<std::uintptr_t>(self);read.preOriginalReaderPosition=pre;read.preOriginalReaderPositionRead=preRead;
     const auto base=p->config.actualEngineImageBase;std::array<std::uint8_t,0x3e0> voice{};
+    std::uintptr_t previewOwnerBefore=0;
+    const bool previewOwnerBeforeRead=readAt(base,globalPreviewChannelOffset,previewOwnerBefore);
     const bool vmtRead=readAt(read.voiceObject,0,read.voiceVMT);
     const bool voiceRead=vmtRead&&read.voiceVMT==base+voiceVMTOffset&&boundedRead(read.voiceObject,voice.data(),voice.size());
     if(voiceRead){read.voiceVMT=fromBytes<std::uintptr_t>(voice.data(),0);read.channelObject=fromBytes<std::uintptr_t>(voice.data(),0x270);
@@ -684,6 +711,9 @@ void FLStandaloneSourceOverlay::processNativeAfterOriginal(void* self,void* cont
             boundedRead(reinterpret_cast<std::uintptr_t>(ended),&read.originalEnded,sizeof(read.originalEnded))&&
             boundedRead(reinterpret_cast<std::uintptr_t>(changed),&read.originalChanged,sizeof(read.originalChanged));
         read.outputMatchesActualNativeContext=actualOutput==reinterpret_cast<std::uintptr_t>(read.nativeInterleavedStereo);}
+    std::uintptr_t previewOwnerAfter=0;
+    const bool previewOwnerAfterRead=readAt(base,globalPreviewChannelOffset,previewOwnerAfter);
+    recordDefaultPreviewOwnerObservation(read,previewOwnerBeforeRead,previewOwnerBefore,previewOwnerAfterRead,previewOwnerAfter);
     processObservedAfterOriginal(read);
 }
 } // namespace rysup::ara_lab
@@ -720,6 +750,7 @@ struct FLStandaloneSourceOverlayOfflineAccess{
     static std::size_t regionCount(const void* pointer)noexcept{return static_cast<const FLStandaloneSourceOverlay::Impl::Table*>(pointer)->regions.size();}
     static float cacheValue(const void* pointer)noexcept{return static_cast<const FLStandaloneSourceOverlay::Impl::Table*>(pointer)->regions[0].source->cache->channels[0][2];}
     static std::size_t retiredCount(const FLStandaloneSourceOverlay& router)noexcept{return router.p->retired.size();}
+    static void seedQualifiedPreviewCounter(FLStandaloneSourceOverlay& router,std::uint64_t value)noexcept{router.p->qualifiedPreviewUnrelatedCallbacks.store(value);}
     static void seedUnrelatedLegacyCountersNearWrap(FLStandaloneSourceOverlay& router)noexcept{
         for(auto& item:router.p->controls){item.second->counters.calls.store(std::numeric_limits<std::uint64_t>::max()-2);
             item.second->counters.rejected.store(std::numeric_limits<std::uint64_t>::max()-2);}
@@ -1173,6 +1204,90 @@ void retiredPhysicalDiagnosticControls(){
         &&d.observed.sampleObject==d.entry.expected.sampleObject+16&&overlayOfflineRTAllocations.load()==0,"retired-table diagnostic was lost or dereferenced after source/model release");
     pass("ReaderGuard-protected retired table yields copied numeric provenance; later status survives model destruction without retaining or dereferencing those addresses");
 }
+FLStandaloneSourceRead syntheticDefaultPreviewRead(const FLNativeModelSnapshot& model,float* output){
+    // Actual-C9 shape is incidental non-target metadata, not a 44.1k ARA test.
+    // Its clip/index aliases deliberately nominate the real first Playlist row.
+    auto read=syntheticRead(model,1,output);read.channelObject=0xd00000;read.channelVMT=syntheticBase+previewChannelVMTOffset;
+    read.sampleObject=0xd10000;read.readerObject=0xd20000;read.channelSample328=read.sampleObject;read.readerSample78=read.sampleObject;
+    read.nativePCM90=0xd30000;read.readerPCM40=read.nativePCM90;read.nativeMixerInsert=0;read.nativeSourceFrames=90867;
+    read.nativeRate=44100;read.nativeRateFactor=1;read.nativeFormat78=2;read.readerChannelsA0=2;read.readerStride48=2;read.readerStep=.91875;read.stretchProvider100=0xd40000;
+    read.sourceStartFrame=0;read.nativeBlockFrames=17;read.originalReadFrames=17;read.originalEnded=1;read.originalChanged=1;
+    recordDefaultPreviewOwnerObservation(read,true,read.channelObject,true,read.channelObject);return read;
+}
+template<class Change>void rejectUnprovedPreview(const char* name,Change change){
+    OfflineFixture f;std::array<float,64> output;output.fill(marker);auto read=syntheticDefaultPreviewRead(*f.model,output.data()+1);change(read);const auto before=output;
+    demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Rejected&&output==before&&!f.monoGate->authorizes(f.monoGate->currentTicket()),"unproved preview role bypassed existing target guards");
+    demand(f.router.counters().qualifiedPreviewUnrelatedCallbacks==0&&f.owner.fault,"failed preview proof credited the narrow exception or lost fault");
+    const auto stats=f.router.instanceStatsOnModelThread();demand(stats[0].physicalIdentityDiagnosticReadyMask==1
+        &&stats[0].physicalIdentityDiagnostics[0].branch==FLStandalonePhysicalIdentityBranch::MappingAgreementA,"unproved aliasing voice lost unchanged C9 first-physical diagnostics");
+    pass(name);
+}
+void defaultPreviewOwnerControls(){
+    {
+        OfflineFixture f;std::array<float,64> output;output.fill(marker);auto read=syntheticDefaultPreviewRead(*f.model,output.data()+1);const auto before=output;const auto ticket=f.monoGate->currentTicket();
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Unrelated&&output==before&&read.originalReadFrames==17&&read.originalEnded==1&&read.originalChanged==1,
+            "independently owned default preview changed original output/count/flags or hit borrowed clip aliases");
+        const auto stats=f.router.instanceStatsOnModelThread();const auto totals=f.router.counters();
+        demand(f.monoGate->authorizes(ticket)&&!f.owner.fault&&!f.owner.staleHold&&stats[0].physicalIdentityDiagnosticReadyMask==0&&stats[0].counters.nativeCallbacks==0
+            &&totals.unrelated==1&&totals.qualifiedPreviewUnrelatedCallbacks==1&&stats[0].counters.qualifiedPreviewUnrelatedCallbacks==0,"default preview touched an insert gate/fault/diagnostic or inferred per-insert ownership");
+        pass("exact current default-global Preview role bypasses borrowed clip/index aliases as original-only unrelated, preserves output/count/flags and credits only global evidence");
+    }
+    {
+        OfflineFixture f;f.monoGate->invalidate();const auto ticket=f.monoGate->currentTicket();std::array<float,64> output;output.fill(marker);auto read=syntheticDefaultPreviewRead(*f.model,output.data()+1);const auto before=output;
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Unrelated&&output==before&&f.monoGate->currentTicket().epoch==ticket.epoch
+            &&!f.owner.staleHold&&!f.owner.fault&&f.router.counters().heldCallbacks==0,"stale Playlist cache silenced or faulted independently proven default preview");
+        pass("proven default preview remains original-only when ARA cache is stale and never changes target gate or queues stale hold");
+    }
+    {
+        OfflineFixture f;std::array<float,64> output;output.fill(marker);auto read=syntheticDefaultPreviewRead(*f.model,output.data()+1);read.originalReadFrames=0;const auto before=output;
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Unrelated&&output==before&&read.originalEnded==1&&read.originalChanged==1&&f.router.counters().zeroReadCallbacks==0,"preview EOF/tail gained target-source credit or buffer changes");
+        pass("qualified default preview zero reads retain all original tail bytes and flags without target EOF or rendered-frame credit");
+    }
+    rejectUnprovedPreview("Preview class and incidental mixer/PCM/record shape alone never authorize non-Playlist exclusion",[](auto& read){read.globalPreviewOwnerReadCoherent=false;});
+    rejectUnprovedPreview("failed first live default-global read keeps existing strict physical identity diagnostics",[](auto& read){recordDefaultPreviewOwnerObservation(read,false,read.channelObject,true,read.channelObject);});
+    rejectUnprovedPreview("failed second live default-global read keeps existing strict physical identity diagnostics",[](auto& read){recordDefaultPreviewOwnerObservation(read,true,read.channelObject,false,read.channelObject);});
+    rejectUnprovedPreview("two null default-global reads do not establish an owner",[](auto& read){recordDefaultPreviewOwnerObservation(read,true,0,true,0);});
+    rejectUnprovedPreview("different before/after default-global values fail closed even when final value matches observed channel",[](auto& read){recordDefaultPreviewOwnerObservation(read,true,read.channelObject+8,true,read.channelObject);});
+    rejectUnprovedPreview("same-class preview pool object is not exempted by default-global authority for another object",[](auto& read){recordDefaultPreviewOwnerObservation(read,true,read.channelObject+0x1000,true,read.channelObject+0x1000);});
+    rejectUnprovedPreview("unknown preview-like class is not exempted even with coherent default-global equality",[](auto& read){read.channelVMT+=8;});
+    rejectUnprovedPreview("wrong native voice class is not exempted by Preview class/global equality",[](auto& read){read.voiceVMT+=8;});
+    rejectUnprovedPreview("incomplete native observation remains strict despite Preview class/global equality",[](auto& read){read.nativeObservationComplete=false;});
+    rejectUnprovedPreview("missing actual voice or reader object cannot gain a Preview exemption",[](auto& read){read.voiceObject=0;read.readerObject=0;});
+    {
+        OfflineFixture f;std::array<float,64> output;output.fill(marker);auto read=syntheticDefaultPreviewRead(*f.model,output.data()+1);read.voiceRecordRead=false;const auto before=output;
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Unrelated&&output==before&&f.router.counters().qualifiedPreviewUnrelatedCallbacks==0
+            &&!f.owner.fault&&f.monoGate->authorizes(f.monoGate->currentTicket()),"incomplete unidentifiable read gained Preview proof or changed legacy unrelated behavior");
+        pass("missing native record follows existing unidentifiable unrelated behavior without crediting qualified Preview authority");
+    }
+    {
+        OfflineFixture f;std::array<float,64> output;output.fill(marker);auto read=syntheticDefaultPreviewRead(*f.model,output.data()+1);
+        read.channelObject=f.model->channels[0].channelObject;recordDefaultPreviewOwnerObservation(read,true,read.channelObject,true,read.channelObject);const auto before=output;
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Rejected&&output==before&&!f.monoGate->authorizes(f.monoGate->currentTicket())&&f.router.counters().qualifiedPreviewUnrelatedCallbacks==0,"captured physical pointer replacement/reuse gained Preview exclusion");
+        const auto faults=f.router.takeFaultsOnModelThread();demand(faults.size()==1&&faults[0].firstFault==FLStandaloneOverlayFault::ClassSeal,"captured class replacement lost its original class-seal rejection");
+        pass("captured Playlist pointer cannot be excluded even if replaced by Preview class and claimed by default global");
+    }
+    {
+        OfflineFixture f;f.router.publish("stereo",f.stereo,f.model,syntheticBatch("stereo",f.stereo,f.stereoGate));std::array<float,64> output;output.fill(marker);
+        auto read=syntheticDefaultPreviewRead(*f.model,output.data()+1);read.channelObject=f.model->channels[1].channelObject;recordDefaultPreviewOwnerObservation(read,true,read.channelObject,true,read.channelObject);const auto before=output;
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Rejected&&output==before&&!f.monoGate->authorizes(f.monoGate->currentTicket())
+            &&!f.stereoGate->authorizes(f.stereoGate->currentTicket())&&f.router.counters().qualifiedPreviewUnrelatedCallbacks==0,"physical pointer owned by another captured insert was incorrectly exempted");
+        pass("physical exclusion checks every captured insert, retaining strict contradictory cross-insert ownership rejection");
+    }
+    {
+        OfflineFixture f;auto read=f.read();recordDefaultPreviewOwnerObservation(read,true,0xd00000,true,0xd00000);
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Applied&&f.router.counters().qualifiedPreviewUnrelatedCallbacks==0,"real Playlist source with independent preview global stopped using its exact edited cache");
+        f.monoGate->invalidate();f.output.fill(marker);demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::HeldForRebuild&&f.owner.staleHold
+            &&f.router.counters().qualifiedPreviewUnrelatedCallbacks==0,"real stale Playlist source escaped the existing hold via preview authority");
+        pass("real Playlist and stale Playlist sources retain exact edited-cache and stale-hold behavior while default-preview proof exists independently");
+    }
+    {
+        OfflineFixture f;FLStandaloneSourceOverlayOfflineAccess::seedQualifiedPreviewCounter(f.router,std::numeric_limits<std::uint64_t>::max()-1);
+        std::array<float,64> output;output.fill(marker);auto read=syntheticDefaultPreviewRead(*f.model,output.data()+1);const auto before=output;
+        for(int i=0;i<4;++i)demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Unrelated&&output==before,"global Preview evidence counter changed unrelated processing");
+        demand(f.router.counters().qualifiedPreviewUnrelatedCallbacks==std::numeric_limits<std::uint64_t>::max(),"global Preview evidence counter wrapped instead of saturating");
+        pass("global-only qualified Preview evidence counter saturates near uint64 wrap without gate or output changes");
+    }
+}
 void forwardingControl(){
     struct NativeCall{unsigned calls=0;std::uintptr_t enabled=0;void* context=nullptr;double readerPosition=17,voiceSnapshot=-1;std::array<float,8> values{};}native;
     auto original=+[](void* self,std::uintptr_t enabled,void* context,float** output,std::int32_t* count,std::uint8_t* ended,std::uint8_t* changed){
@@ -1240,7 +1355,7 @@ void disabledTeardownControls(){
     }
 }
 int sourceOverlayOfflineMain(){
-    positiveControls();zeroControls();staleHoldControls();negativeControls();publicationControls();observedChannelClassControls();physicalDiagnosticBranchControls();fixedPhysicalDiagnosticControls();concurrentPhysicalDiagnosticControls();retiredPhysicalDiagnosticControls();forwardingControl();concurrentLifecycleControl();disabledTeardownControls();
+    positiveControls();zeroControls();staleHoldControls();negativeControls();publicationControls();observedChannelClassControls();physicalDiagnosticBranchControls();fixedPhysicalDiagnosticControls();concurrentPhysicalDiagnosticControls();retiredPhysicalDiagnosticControls();defaultPreviewOwnerControls();forwardingControl();concurrentLifecycleControl();disabledTeardownControls();
     std::cout<<"{\"schema\":\"rysup.standalone-fl.source-overlay-offline/1\",\"pass\":true,\"checks\":"<<passed.size()
         <<",\"synthetic_inputs\":true,\"native_engine_loaded\":false,\"native_hook_installed\":false,\"third_party_runtime_qualified\":false,\"rt_allocations\":"<<overlayOfflineRTAllocations.load()<<",\"controls\":[";
     for(std::size_t i=0;i<passed.size();++i){if(i)std::cout<<',';std::cout<<'"'<<passed[i]<<'"';}std::cout<<"]}\n";return 0;

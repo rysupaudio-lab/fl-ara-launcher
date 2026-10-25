@@ -1,0 +1,58 @@
+{
+  "schema": "rysup.fl-ara-runtime-source-delta/1",
+  "candidate": "r10-setup-preview",
+  "prior_runtime_source_manifest": "runtime-source-r9.json",
+  "upstream_source_freeze_sha256": "bcc37ba4350fc37ecfd9a6fadc167f6f363999ba1d7a0e6d8b6f9b2dc75cf27c",
+  "runtime_allowlist_sha256": "b6adfb6f99bf35e719d2f13ed95338b08b1f776d2ab32bc12efbfa7dc7ad0ca9",
+  "compile_manifest_sha256": "f0a96afeaf795a0b33836c598cdeb41f4468dddd6620697e19f9eeeb25e50363",
+  "compiled_artifact_verification_sha256": "815d00edd87616952d1b73102ac481b71bdd1d237921785d2b9261cfde0b76bb",
+  "compiled_helper_original_sha256": "76b33e1b75df7a056a8eb8a76674b8c318c0555de96877abae6561eb69913309",
+  "candidate_kind": "supported-setup-continuity-and-exact-default-preview-routing",
+  "diagnostic_only": false,
+  "guard_logic_changed": true,
+  "actual_audio_io_qualified": false,
+  "runtime_qualified": false,
+  "sdk_source_imported": false,
+  "vendor_binary_or_audio_imported": false,
+  "private_qa_static_review_imported": false,
+  "files": [
+    {
+      "path": "native/bridge/native/FLAppBridge.mm",
+      "previous_sha256": "e318969bd3ad0ad7a7e88d08d002b0f0d610d4e7bc0e0a0e6e1c81d8bbdf5726",
+      "sha256": "d8f93daacc1d7c6776bd41ee4030e9e1aa7cad99aaaf07fd83daff5221e90974",
+      "bytes": 115318
+    },
+    {
+      "path": "native/bridge/native/FLStandaloneSourceOverlay.cpp",
+      "previous_sha256": "283919dc97bb5c21632ba51f24a4226a61d43668e80508c3ddde89a1fd20a88d",
+      "sha256": "eaae4635d6dff2f758079cd7dc4379f51a386c0ec0ed411e3b95ef53a2d68046",
+      "bytes": 139814
+    },
+    {
+      "path": "native/bridge/native/FLNativeEditorSetupCachePolicy.h",
+      "previous_sha256": null,
+      "sha256": "a9a06cb3336b90b8a3f944d34ac10d0f9471750043fbd773b28b12fbb776e337",
+      "bytes": 2979
+    },
+    {
+      "path": "native/bridge/native/FLStandaloneSourceOverlay.h",
+      "previous_sha256": "8bfa4e5af9f06fc207ddd646a965916c7c435c0cc08cbdd928f8d26e338f76dc",
+      "sha256": "c0e35340d6d97ee464df07f924aa724d27e6b3bdf04ce4fcd463698fc7dedb7c",
+      "bytes": 12789
+    },
+    {
+      "path": "native/bridge/native/FL_NATIVE_EDITOR_SETUP_CACHE_POLICY.md",
+      "sha256": "4eec9d6182c7788aa2194ef0ba1d6d170cb1ea6bb49878267c4dd1cbb46c3b90",
+      "frozen_sha256": "31fc428b3702f8e6c3b017a5a499f7bc433aa3e9399c6668ba1fd810c0f3d944",
+      "public_doc_transform": "omit_private_runtime_story_and_unbundled_static_evidence_link",
+      "bytes": 2643
+    },
+    {
+      "path": "native/bridge/native/FL_DEFAULT_PREVIEW_ROLE.md",
+      "sha256": "c731e31b79784470b1d4232312787da9a706a75c909bba8eff47b3c9f671775a",
+      "frozen_sha256": "a1c8bf8221377e1b3a80db11fddda1302cdae3f5624ded8c000e7c3db9a8610b",
+      "public_doc_transform": "omit_private_runtime_story_and_unbundled_static_evidence_link",
+      "bytes": 3834
+    }
+  ]
+}

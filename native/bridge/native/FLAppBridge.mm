@@ -5,6 +5,7 @@
 #include "FLStandaloneSourceOverlay.h"
 #include "FLNativeProcessObserver.h"
 #include "FLNativeMixBoundary.h"
+#include "FLNativeSaveGuard.h"
 #include "RegistrationReadThrough.h"
 #include "../host/FLStandaloneGraphDecoder.h"
 #include "../host/FLStandaloneStateEnvelope.h"
@@ -20,6 +21,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <thread>
@@ -32,15 +34,19 @@ namespace lab=rysup::ara_lab;
 namespace hooks=rysup::fl_ara::native_hooks;
 using Steinberg::kResultOk;using Steinberg::kResultFalse;
 void demand(bool okay,const char* reason){if(!okay)throw std::runtime_error(reason);}
+struct ObservedNativeInstance;
 struct BridgeRecord {
     hooks::InstanceRecord* native=nullptr;
+    std::atomic<ObservedNativeInstance*> currentControllerNode{nullptr};
     NativeInsert insert;
     lab::StandaloneInstanceIdentity identity;
     std::atomic<BridgeRecord*> next{nullptr};
-    std::atomic<bool> dirty{true},fault{false},alive{true},initialPrimePending{true};
+    std::atomic<bool> dirty{true},fault{false},alive{true},initialPrimePending{true},nativeStopForRebuildPending{false};
+    std::atomic<std::uint64_t> nativeNormalizedParameterNotifications{0},nativeHandlerParameterNotifications{0},nativeInputQueueParameterNotifications{0};
+    std::atomic<std::uint64_t> nativeStopRequestedEpoch{0};std::uint64_t actualNativeStopsVerified=0;bool initialWaitNoticeShown=false;
     NativeMixBoundary lastNativeMixBoundary,lifecycleBindingMixDiagnostic;bool modelMixBoundaryAvailable=false;
     bool disabled=false,boundary=false;std::atomic<bool> active{false},processing{false},observedInactive{false},observedStopped{false};
-    std::atomic<bool> setupQualified{false};bool graphApplied=false,teardown=false,pendingPlainLoad=false,synchronousTerminating=false,teardownCallerVerified=false;
+    std::atomic<bool> setupQualified{false};bool graphApplied=false,teardown=false,pendingPlainLoad=false,synchronousTerminating=false,teardownCallerVerified=false,actualNativeSaveMetadataCapture=false;
     std::atomic<double> sampleRate{0};std::string error,appliedGraph,appliedModel,lastNativeStateCaller;
     std::optional<lab::FLStandaloneDecodedGraph> decoded;
     std::shared_ptr<const lab::FLNativeModelSnapshot> copied;
@@ -49,11 +55,35 @@ struct BridgeRecord {
     bool staticSignatureChecked=false,staticSignatureValid=false;
     std::int32_t staticSignatureStatus=0;
     std::string pluginBundlePath,factoryEntryImagePath,factoryEntryImageSHA256;
+    std::optional<lab::PreparedEditorArchive> preparedNativeSave;
+    std::atomic<std::uint64_t> nativeDirtyPendingRevision{0};
+    std::uint64_t nativeDirtyRequestedRevision=0,nativeDirtyRequestsReturned=0;bool nativeDirtyRetryAfterSaveRefusal=false;
     std::optional<lab::StandaloneSavedEditorArchive> pendingArchive;
     std::optional<lab::Bytes> pendingOrdinaryComponentState;
     lab::StandaloneNativeStateLoadAuthority pendingLoad;
     std::uint64_t nativeLoadSerial=0;
 };
+struct ObservedNativeInstance {
+    hooks::InstanceRecord* native=nullptr;std::atomic<ObservedNativeInstance*> next{nullptr};
+    std::atomic<BridgeRecord*> controllerOwner{nullptr};
+    std::atomic<Steinberg::Vst::IEditController*> verifiedController{nullptr};
+};
+void publishControllerAssociationOnMain(hooks::InstanceRecord&)noexcept;
+void invalidateAssociatedARACache(BridgeRecord&)noexcept;
+void publishAllControllerAssociationsOnMain()noexcept;
+struct FrozenNativeSaveComponent {
+    BridgeRecord* record=nullptr;bool previousProcessAllowed=false;
+    std::optional<lab::PreparedEditorArchive> prepared;
+    std::shared_ptr<const lab::StandaloneSavedEditorArchive> archive;
+    lab::StandaloneSnapshotData actualPreflight;
+    std::uint64_t serializedCalls=0,ordinaryBytes=0,envelopeBytes=0;
+};
+struct NativeSaveFreeze {
+    NativeSaveRequest request;
+    std::vector<FrozenNativeSaveComponent> components;
+    bool preflightPassed=false,precommitPassed=false;
+};
+constexpr std::uint32_t protectedUnboundArchive=1u,genuineARAEntryObserved=2u,nativeObservedStateDirtyPending=4u;
 struct Runtime;
 Runtime& runtime();
 struct Adapter final:lab::StandaloneOwnerAdapter,lab::StandaloneArchiveSourceValidator {
@@ -63,6 +93,8 @@ struct Adapter final:lab::StandaloneOwnerAdapter,lab::StandaloneArchiveSourceVal
     lab::StandaloneSnapshotData copyActualCurrentRAMAndClock(const lab::StandaloneInstanceIdentity&)override;
     void invalidateActualNativeOverlayImmediately(const std::string&,std::uint64_t)noexcept override;
     void enqueueModelThreadRebuild(const std::string&)noexcept override;
+    void queueActualNativeStopForCacheRebuild(const std::string&,std::uint64_t)noexcept override;
+    void queueActualNativeDocumentDirtyFromARA(const std::string&,std::uint64_t)noexcept override;
     void showARAUnavailableForInsert(const std::string&,const std::string&)noexcept override;
     lab::StandaloneArchiveRestoreValidation validateActualCurrentRAMForArchive(
         const lab::StandaloneSavedEditorArchive&,const lab::StandaloneInstanceIdentity&)override;
@@ -74,8 +106,15 @@ struct Runtime {
     std::atomic<lab::FLStandaloneSourceOverlay*> overlayListener{nullptr};
     std::atomic<std::uint64_t> unsupportedOffMainARAInitializations{0},unboundArchiveRefusals{0};
     std::atomic<BridgeRecord*> head{nullptr};
+    std::atomic<ObservedNativeInstance*> observedNativeInstances{nullptr};
+    std::atomic<bool> nativeInstanceTrackingIncomplete{false};
+    std::unique_ptr<NativeSaveFreeze> nativeSaveFreeze;
+    bool nativeSaveGuardInitialized=false,nativeSaveAlertQueued=false;
+    std::uint64_t separateControllerAssociationsVerified=0,nativeObservedStateDirtyRequestsReturned=0;
+    std::uint64_t nativeSavePreflights=0,nativeSavePreflightsAllowed=0,nativeSavePrecommitsAllowed=0,nativeSaveFramesFinished=0,nativeSaveEnvelopes=0;
+    std::string nativeSaveError;
     std::vector<std::unique_ptr<BridgeRecord>> records;
-    std::atomic<bool> overlayFault{false};
+    std::atomic<bool> overlayFault{false},overlayStaleHoldQueued{false};bool nativeStopNoticeQueued=false;
     bool hooksInstalled=false,overlayInstalled=false,inTick=false,anyBoundary=false,observeNativeDSP=false;
     std::string error;std::uint64_t ticks=0;
     BridgeRecord* byID(const std::string& id)const noexcept{
@@ -96,6 +135,31 @@ void observeAndRequireNativeMixBoundary(BridgeRecord& r){
     }
     r.modelMixBoundaryAvailable=true;
 }
+bool hasLiveProtectedNativeArchive()noexcept{
+    if(runtime().nativeInstanceTrackingIncomplete.load())return true;
+    for(auto* p=runtime().observedNativeInstances.load();p;p=p->next.load())if(p->native->nativeAlive.load()&&!p->native->nativeTerminated.load()
+        &&(p->native->ownerStateFlags.load()&protectedUnboundArchive))return true;
+    return false;
+}
+bool hasLiveNativeARA(void*)noexcept{
+    // Called afresh at each native file boundary. Every input is atomic and
+    // every node has process lifetime; no main-thread false snapshot can erase
+    // a concurrent native ARA/envelope observation.
+    if(runtime().nativeInstanceTrackingIncomplete.load())return true;
+    for(auto* p=runtime().observedNativeInstances.load();p;p=p->next.load())if(p->native->nativeAlive.load()&&!p->native->nativeTerminated.load()
+        &&(p->native->ownerStateFlags.load()&(protectedUnboundArchive|genuineARAEntryObserved)))return true;
+    return false;
+}
+void publishNativeARAObservation(hooks::InstanceRecord& n,std::uint32_t flag)noexcept{
+    const bool saveWasActive=hasActiveNativeSaveFromAnyThread();n.ownerStateFlags.fetch_or(flag);
+    const bool failedBeforeCommit=markActiveNativeSaveFailedFromAnyThread();
+    // An already committing Save cannot be vetoed without stranding its target.
+    // Queue actual unsaved state only around an active Save, not ordinary cold
+    // loading. Actual ARA edit revisions have their separate dirty mailbox.
+    if(saveWasActive||failedBeforeCommit||hasActiveNativeSaveFromAnyThread())n.ownerStateFlags.fetch_or(nativeObservedStateDirtyPending);
+}
+void observeGenuineARA(hooks::InstanceRecord& n)noexcept{publishNativeARAObservation(n,genuineARAEntryObserved);}
+void preserveUnboundARA(hooks::InstanceRecord& n)noexcept{publishNativeARAObservation(n,protectedUnboundArchive);runtime().unboundArchiveRefusals.fetch_add(1);}
 struct Boundary {
     BridgeRecord& r;bool previous=false;
     explicit Boundary(BridgeRecord& value):r(value){
@@ -162,8 +226,13 @@ lab::StandaloneNativeTeardownBoundary Adapter::verifyActualNativeTeardownBoundar
     proof.ownNativeProcessGateClosed=!r->native->nativeProcessAllowed.load();proof.actualOriginalProcessCallsInFlight=r->native->actualNativeProcessCallsInFlight.load();
     proof.nativeOriginalTerminateNotYetCalled=r->synchronousTerminating&&!r->native->nativeTerminated;return proof;
 }
-lab::StandaloneSnapshotData Adapter::copyActualCurrentRAMAndClock(const lab::StandaloneInstanceIdentity& identity){
-    auto* r=runtime().byID(identity.instanceID);demand(r&&r->boundary,"current RAM copy needs real native boundary");
+lab::StandaloneSnapshotData captureActualNativeSnapshotData(BridgeRecord& target,const lab::StandaloneInstanceIdentity& identity,bool metadataOnly){
+    auto* r=&target;
+    demand(pthread_main_np()&&nativeApplicationAdmitted()&&stopped()&&r->alive&&!r->teardown
+        &&!r->native->nativeProcessAllowed.load()&&r->native->actualNativeProcessCallsInFlight.load()==0,
+        "actual native metadata capture requires stopped/drained owned component");
+    demand(metadataOnly?r->actualNativeSaveMetadataCapture:(r->boundary&&r->modelMixBoundaryAvailable),
+        "current RAM copy needs its actual model or guarded native-save metadata boundary");
     demand(r->setupQualified&&r->sampleRate==48000,"actual native setupProcessing has not established the supported 48k profile");
     lab::FLStandaloneComponentAssociation association;association.actualComponent=identity.actualComponent;
     association.nativeOwnerObject=nativeApplication().engineInstance;association.mixerInsert=r->insert.mixerInsert;
@@ -174,13 +243,13 @@ lab::StandaloneSnapshotData Adapter::copyActualCurrentRAMAndClock(const lab::Sta
         capture=lab::FLStandaloneGraphDecoder::captureActualCurrentRAMAtNativeLock(engineSeal,modelOptions(r->insert.mixerInsert),association);
     });
     demand(locked&&capture.has_value(),"actual native mix-lock RAM capture failed");
-    observeAndRequireNativeMixBoundary(*r);
+    if(!metadataOnly)observeAndRequireNativeMixBoundary(*r);
     // All ARA/provider work happens AFTER native HostLockMix is released.
     auto decoded=lab::FLStandaloneGraphDecoder::decode(*capture,FL_APP_DECODER_SHA256);
-    auto copied=std::make_shared<const lab::FLNativeModelSnapshot>(capture->model());
+    const auto& copied=capture->model();
     lab::StandaloneSnapshotData data;data.actual=identity;data.graph=decoded.graph;
     data.resolveCurrentImmutableRAMSource=decoded.resolveCurrentImmutableRAMSource;
-    auto& m=data.model;m.nativeProjectIdentity=copied->currentArrangementRuntimeID;
+    auto& m=data.model;m.nativeProjectIdentity=copied.currentArrangementRuntimeID;
     m.nativeEngineSHA256=nativeApplication().engine.verifiedArm64SliceSHA256;
     m.nativeRecordModelSHA256=decoded.nativeRecordModelSHA256;m.sourcePCMModelSHA256=decoded.sourcePCMModelSHA256;
     m.graphSHA256=decoded.graphSHA256;m.nativeSaveVersion=decoded.nativeSaveVersion;
@@ -191,20 +260,47 @@ lab::StandaloneSnapshotData Adapter::copyActualCurrentRAMAndClock(const lab::Sta
     for(const auto& s:decoded.modifications)data.modifications.push_back({s.modificationID,s.nativePhysicalEditKey,s.sourceID});
     for(const auto& s:decoded.regions)data.regions.push_back({s.regionID,s.nativePhysicalRegionKey,s.modificationID});
     data.actualCopiedNativeModelRecords=decoded.actualCopiedNativeModelRecords;
-    for(const auto& clip:copied->clips)if(clip.kind==lab::FLNativeRecordKind::AudioChannel)data.actualVerifiedAudioRecordIndices.push_back(clip.nativeListIndex);
+    for(const auto& clip:copied.clips)if(clip.kind==lab::FLNativeRecordKind::AudioChannel)data.actualVerifiedAudioRecordIndices.push_back(clip.nativeListIndex);
     data.decoderIdentity=decoded.decoderIdentity;data.decoderSourceSHA256=decoded.decoderSourceSHA256;
     data.actualCurrentNativeRAMCopiedAndVerified=decoded.actualCurrentNativeRAMCopiedAndVerified;
     data.actualDirectNativeClockReadTwiceAndEqual=decoded.clock.actualDirectNativeReadTwiceAndEqual;
     data.nativeComponentOwnerInsertAssociationVerified=association.nativePointerAssociationVerified;
     data.noNativeSerializationOrFileFallbackUsed=decoded.noNativeSerializationOrFileAudioFallbackUsed;
-    r->decoded=std::move(decoded);r->copied=std::move(copied);return data;
+    if(!metadataOnly){r->copied=std::make_shared<const lab::FLNativeModelSnapshot>(copied);r->decoded=std::move(decoded);}
+    return data;
+}
+lab::StandaloneSnapshotData Adapter::copyActualCurrentRAMAndClock(const lab::StandaloneInstanceIdentity& identity){
+    auto* r=runtime().byID(identity.instanceID);demand(r&&r->boundary,"current RAM copy needs real native model boundary");
+    return captureActualNativeSnapshotData(*r,identity,false);
 }
 void Adapter::invalidateActualNativeOverlayImmediately(const std::string& id,std::uint64_t)noexcept{
+    markActiveNativeSaveFailedFromAnyThread();
     if(auto* r=runtime().byID(id))r->dirty=true;
     if(auto* overlay=runtime().overlayListener.load(std::memory_order_acquire))overlay->invalidateInstance(id);
 }
 void Adapter::enqueueModelThreadRebuild(const std::string& id)noexcept{if(auto* r=runtime().byID(id))r->dirty=true;}
-void Adapter::showARAUnavailableForInsert(const std::string& id,const std::string&)noexcept{if(auto* r=runtime().byID(id))r->fault=true;}
+void queueNativeStopForCacheRebuild(BridgeRecord& r,std::uint64_t epoch)noexcept{
+    auto old=r.nativeStopRequestedEpoch.load();while(old<epoch&&!r.nativeStopRequestedEpoch.compare_exchange_weak(old,epoch)){}
+    r.nativeStopForRebuildPending=true;
+}
+void Adapter::queueActualNativeStopForCacheRebuild(const std::string& id,std::uint64_t epoch)noexcept{
+    if(auto* r=runtime().byID(id))queueNativeStopForCacheRebuild(*r,epoch);
+}
+bool currentNativeCacheGenerationCoherent(const BridgeRecord& r)noexcept{
+    return r.alive&&!r.disabled&&!r.fault&&!r.teardown&&r.setupQualified&&r.graphApplied&&!r.dirty&&!r.initialPrimePending&&!r.pendingArchive
+        &&r.preparedNativeSave&&r.nativeCacheGate&&r.nativeCacheGate->authorizes(r.preparedNativeSave->identity().currentCacheTicket);
+}
+
+void Adapter::queueActualNativeDocumentDirtyFromARA(const std::string& id,std::uint64_t revision)noexcept{
+    if(!revision)return;markActiveNativeSaveFailedFromAnyThread();
+    if(auto* r=runtime().byID(id)){auto old=r->nativeDirtyPendingRevision.load();
+        while(old<revision&&!r->nativeDirtyPendingRevision.compare_exchange_weak(old,revision)){}
+    }
+}
+void Adapter::showARAUnavailableForInsert(const std::string& id,const std::string&)noexcept{
+    markActiveNativeSaveFailedFromAnyThread();
+    if(auto* r=runtime().byID(id)){if(r->nativeCacheGate)r->nativeCacheGate->invalidate();r->dirty=true;r->fault=true;}
+}
 lab::StandaloneArchiveRestoreValidation Adapter::validateActualCurrentRAMForArchive(
     const lab::StandaloneSavedEditorArchive& archive,const lab::StandaloneInstanceIdentity& id){
     auto* r=runtime().byID(id.instanceID);demand(r&&r->pendingLoad.actualNativeStateLoadCallOrAttestedDeferredWindow,"archive needs actual native setState/load authority");
@@ -252,6 +348,7 @@ std::optional<hooks::ClassID> araClassForActualComponent(hooks::InstanceRecord& 
     ARA::IPlugInEntryPoint* entry=nullptr;
     if(component.queryInterface(INLINE_UID_OF(ARA::IPlugInEntryPoint),reinterpret_cast<void**>(&entry))!=kResultOk||!entry)return{};
     struct Release{ARA::IPlugInEntryPoint* p;~Release(){p->release();}} release{entry};
+    observeGenuineARA(n);
     const auto* actual=entry->getFactory();demand(actual&&actual->factoryID,"actual ARA component factory ID missing");
     auto* f=n.factory->actualFactory;std::optional<hooks::ClassID> found;
     for(Steinberg::int32 index=0;index<f->countClasses();++index){Steinberg::PClassInfo info{};
@@ -264,13 +361,14 @@ std::optional<hooks::ClassID> araClassForActualComponent(hooks::InstanceRecord& 
     demand(found.has_value(),"actual same native factory lacks independent matching ARA provider");return found;
 }
 void initialized(hooks::InstanceRecord& n,void*,Steinberg::FUnknown* context,Steinberg::tresult result,const hooks::ThreadInfo& info,void*)noexcept{
+    if(result==kResultOk&&info.isMainThread&&!info.insideNativeProcess)publishControllerAssociationOnMain(n);
     if(n.createdKind!=hooks::CreatedKind::Component||result!=kResultOk||!nativeApplicationAdmitted()||!n.actualComponent.load())return;
     if(!info.isMainThread){
         // Capability detection stays on this ACTUAL native initialize thread.
         // No ARA factory/DC/bind or borrowed component is deferred to main.
         try{ARA::IPlugInEntryPoint* entry=nullptr;
             if(n.actualComponent.load()->queryInterface(INLINE_UID_OF(ARA::IPlugInEntryPoint),reinterpret_cast<void**>(&entry))==kResultOk&&entry){
-                entry->release();runtime().unsupportedOffMainARAInitializations.fetch_add(1);
+                observeGenuineARA(n);entry->release();runtime().unsupportedOffMainARAInitializations.fetch_add(1);
             }
         }catch(...){runtime().unsupportedOffMainARAInitializations.fetch_add(1);}
         return;
@@ -278,6 +376,7 @@ void initialized(hooks::InstanceRecord& n,void*,Steinberg::FUnknown* context,Ste
     try{
         demand(n.factory&&n.factory->actualFactory,"native component actual factory missing");
         auto* component=n.actualComponent.load();auto araClass=araClassForActualComponent(n,*component);if(!araClass)return;
+        demand(nativeSaveGuardReady()&&!currentNativeSaveTransaction(),"native project-save preservation guard is unavailable or a save is active");
         demand(n.factory&&n.factory->module&&!n.factory->moduleAssociationAmbiguous,"native factory provenance ambiguous");
         const auto& module=*n.factory->module;
         demand(module.actualBundle&&module.stableExecutableSHA256&&module.nativeCodeLeaseRetained&&module.actualFactoryEntryImage.resolved
@@ -321,17 +420,23 @@ void initialized(hooks::InstanceRecord& n,void*,Steinberg::FUnknown* context,Ste
         if(rt.observeNativeDSP)r->nativeProcessObserver=std::make_unique<process_observer::NativeProcessObserver>(n);
         n.nativeProcessAllowed=false; // No first original native process before an actual qualified initial prime.
         n.ownerData=r;n.stateInterceptionEnabled=true;r->next=rt.head.load();rt.head=r;rt.records.push_back(std::move(owned));
+        publishAllControllerAssociationsOnMain();
         writeNativeApplicationEvent("actual_native_ara_component_bound",r->identity.instanceID);
     }catch(const std::exception& e){writeNativeApplicationEvent("actual_native_ara_bind_refused",e.what());runtime().error=e.what();}
     catch(...){writeNativeApplicationEvent("actual_native_ara_bind_refused","unknown native SDK exception");runtime().error="Unknown native SDK exception while binding ARA";}
 }
-void instanceCreated(hooks::InstanceRecord& n,const hooks::ThreadInfo&,void*)noexcept{
-    // Controllers can receive setComponentState before FL associates them with
-    // the component. Their handler only unwraps ordinary bytes, never restores ARA.
-    n.stateInterceptionEnabled=true;
+void instanceCreated(hooks::InstanceRecord& n,const hooks::ThreadInfo& info,void*)noexcept{
+    // Native records themselves have process lifetime. Tracking nodes never
+    // dereference a released native interface and are never reclaimed on RT.
+    if(info.insideNativeProcess){runtime().nativeInstanceTrackingIncomplete=true;}
+    else if(auto* node=new(std::nothrow)ObservedNativeInstance){
+        node->native=&n;n.ownerControllerData=node;auto* old=runtime().observedNativeInstances.load();
+        do{node->next=old;}while(!runtime().observedNativeInstances.compare_exchange_weak(old,node));
+    }else{runtime().nativeInstanceTrackingIncomplete=true;}
+    n.stateInterceptionEnabled=true;markActiveNativeSaveFailedFromAnyThread();
 }
 void refreshAtBoundary(BridgeRecord& r,bool build){
-    auto& rt=runtime();auto snapshot=rt.coordinator->captureActualCurrentSnapshot(r.identity.instanceID);
+    auto& rt=runtime();publishAllControllerAssociationsOnMain();auto snapshot=rt.coordinator->captureActualCurrentSnapshot(r.identity.instanceID);
     const auto currentModel=snapshot.data().model.nativeRecordModelSHA256+":"+snapshot.data().model.sourcePCMModelSHA256+":"+std::to_string(snapshot.data().model.clock.ppq)+":"+std::to_string(snapshot.data().model.clock.tempoMilliBPM);
     if(r.pendingArchive){
         // Pure current-RAM preflight precedes any potentially failing ARA action.
@@ -350,12 +455,19 @@ void refreshAtBoundary(BridgeRecord& r,bool build){
     }else if(r.pendingPlainLoad){r.pendingPlainLoad=false;r.pendingLoad={};}
     rt.coordinator->pollAtStoppedNativeBoundary(r.identity.instanceID);
     if(snapshot.data().graph.regions.empty()){
-        // The exact current native channels/modifications may remain live after
-        // their last Playlist region is deleted. Preserve those ARA edits in
-        // the same document, but authorize no source audio without a region.
-        if(r.nativeCacheGate)r.nativeCacheGate->invalidate();
-        if(rt.overlay){rt.overlay->invalidateInstance(r.identity.instanceID);rt.overlay->removeDisabledInstanceOnModelThread(r.identity.instanceID);}
-        r.dirty=false;r.error.clear();r.initialPrimePending=false;return;
+        if(build&&(r.dirty.exchange(false)||!r.preparedNativeSave||!r.nativeCacheGate->authorizes(r.preparedNativeSave->identity().currentCacheTicket))){
+            // Retire the OLD unauthorized table before authorizing the fresh
+            // empty ticket; never invalidate that fresh ticket on unchanged ticks.
+            if(rt.overlay){rt.overlay->invalidateInstance(r.identity.instanceID);rt.overlay->removeDisabledInstanceOnModelThread(r.identity.instanceID);}
+            lab::WholeSourceCacheOptions emptyOptions;emptyOptions.maximumSourceFrames=48000u*300u;
+            auto empty=rt.coordinator->rebuildWholeSourceCaches(r.identity.instanceID,snapshot,emptyOptions);
+            demand(empty.noSourceOverlayRequired&&empty.modifications.empty(),"empty native graph unexpectedly requested source DSP");
+            r.preparedNativeSave=rt.coordinator->prepareEditorArchiveForNativeSave(r.identity.instanceID,snapshot);
+        }
+        if(r.preparedNativeSave&&r.nativeCacheGate->authorizes(r.preparedNativeSave->identity().currentCacheTicket)){
+            r.error.clear();r.initialPrimePending=false;r.initialWaitNoticeShown=false;
+        }
+        return;
     }
     if(build&&r.dirty.exchange(false)&&r.graphApplied){
         lab::WholeSourceCacheOptions options;options.maximumSourceFrames=48000u*300u;options.applyOrdinaryCompanionStateBeforeActivation=true;
@@ -379,39 +491,206 @@ void refreshAtBoundary(BridgeRecord& r,bool build){
         for(const auto& source:cache.modifications)demand(source.reportedLatencySamples==0&&source.reportedHeadSeconds==0&&source.reportedTailSeconds==0,
             "this third-party ARA source cache reports latency/head/tail; overlay profile refuses unsupported timing");
         demand(r.decoded.has_value()&&r.copied,"source overlay requires exact current decoded model");
-        rt.overlay->publish(r.identity.instanceID,*r.decoded,r.copied,std::move(cache));r.error.clear();r.initialPrimePending=false;
+        rt.overlay->publish(r.identity.instanceID,*r.decoded,r.copied,std::move(cache));
+        r.preparedNativeSave=rt.coordinator->prepareEditorArchiveForNativeSave(r.identity.instanceID,snapshot);
+        r.error.clear();r.initialPrimePending=false;r.initialWaitNoticeShown=false;
         writeNativeApplicationEvent("actual_native_ara_source_cache_published",r.identity.instanceID);
     }
 }
+bool sameSaveRequest(const NativeSaveRequest& a,const NativeSaveRequest& b)noexcept{
+    return a.actualSaveFrame&&a.actualSaveFrame==b.actualSaveFrame&&a.targetPath==b.targetPath&&a.actualOpenPath==b.actualOpenPath
+        &&a.nativeFlags==b.nativeFlags&&a.actualSaveType==b.actualSaveType&&a.directedTarget==b.directedTarget;
+}
+void closeAndDrainNativeSaveComponent(FrozenNativeSaveComponent& frozen){
+    auto& r=*frozen.record;frozen.previousProcessAllowed=r.native->nativeProcessAllowed.exchange(false);
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+    while(r.native->actualNativeProcessCallsInFlight.load()){
+        demand(std::chrono::steady_clock::now()<=deadline,"native process drain timed out before file creation");std::this_thread::yield();
+    }
+}
+lab::StandaloneSnapshotData captureMetadataForNativeSave(BridgeRecord& r){
+    demand(!r.actualNativeSaveMetadataCapture,"native save metadata capture reentry");
+    r.actualNativeSaveMetadataCapture=true;struct Reset{bool& flag;~Reset(){flag=false;}}reset{r.actualNativeSaveMetadataCapture};
+    return captureActualNativeSnapshotData(r,r.identity,true);
+}
+bool nativeSavePreflight(const NativeSaveRequest& request,void** cookie,void*)noexcept{
+    if(cookie)*cookie=nullptr;auto& rt=runtime();++rt.nativeSavePreflights;
+    try{
+        demand(cookie&&pthread_main_np()&&nativeApplicationAdmitted()&&nativeSaveGuardReady(),"native save protection is unavailable");
+        demand(!rt.nativeSaveFreeze&&stopped()&&!request.directedTarget&&request.actualSaveType==0,"native ARA save requires stopped full-project temporary-file route");
+        demand(!hasLiveProtectedNativeArchive(),"an alive native component still has an unresolved protected ARA archive");
+        std::vector<BridgeRecord*> live;
+        for(auto& node:rt.records)if(node->alive&&node->native->nativeAlive&&!node->native->nativeTerminated)live.push_back(node.get());
+        if(live.empty())return true;
+        rt.nativeSaveFreeze=std::make_unique<NativeSaveFreeze>();auto& freeze=*rt.nativeSaveFreeze;freeze.request=request;
+        *cookie=&freeze;freeze.components.reserve(live.size());
+        for(auto* r:live){
+            demand(!r->disabled&&r->setupQualified&&r->graphApplied&&!r->initialPrimePending&&!r->pendingArchive&&!r->dirty
+                &&r->preparedNativeSave,"a bound ARA component has no exact ready prepared archive");
+            FrozenNativeSaveComponent entry;entry.record=r;entry.prepared=r->preparedNativeSave;
+            freeze.components.push_back(std::move(entry));closeAndDrainNativeSaveComponent(freeze.components.back());
+        }
+        for(auto& entry:freeze.components){
+            entry.actualPreflight=captureMetadataForNativeSave(*entry.record);
+            entry.archive=std::make_shared<const lab::StandaloneSavedEditorArchive>(rt.coordinator->validatePreparedEditorArchiveForNativeSave(
+                entry.record->identity.instanceID,*entry.prepared,entry.actualPreflight));
+            // Only frozen metadata/digests remain. The pure validator never
+            // invokes a provider, so no duplicated source PCM is held by Save.
+            entry.actualPreflight.resolveCurrentImmutableRAMSource={};
+        }
+        demand(!hasLiveProtectedNativeArchive(),"an unresolved native ARA archive appeared during save preflight");
+        freeze.preflightPassed=true;++rt.nativeSavePreflightsAllowed;rt.nativeSaveError.clear();return true;
+    }catch(const std::exception& e){rt.nativeSaveError=e.what();return false;}
+    catch(...){rt.nativeSaveError="unknown error validating prepared native save";return false;}
+}
+bool nativeSavePrecommit(const NativeSaveRequest& request,void* cookie,void*)noexcept{
+    auto& rt=runtime();try{
+        demand(pthread_main_np()&&nativeApplicationAdmitted()&&stopped()&&!hasLiveProtectedNativeArchive(),"native save state changed before commit");
+        if(!cookie){for(const auto& r:rt.records)demand(!r->alive||!r->native->nativeAlive||r->native->nativeTerminated,"new bound ARA component appeared before ordinary commit");return true;}
+        demand(rt.nativeSaveFreeze.get()==cookie,"native save cookie does not belong to this owner");auto& freeze=*rt.nativeSaveFreeze;
+        demand(freeze.preflightPassed&&sameSaveRequest(freeze.request,request),"native save frame/request changed before commit");
+        std::size_t live=0;for(const auto& r:rt.records)if(r->alive&&r->native->nativeAlive&&!r->native->nativeTerminated)++live;
+        demand(live==freeze.components.size(),"bound ARA component membership changed during native save");
+        // Prove ALL required serializations before touching any native source
+        // metadata. A missing later component must never be hidden by an
+        // earlier component's successful SDK state call.
+        for(const auto& entry:freeze.components)demand(entry.serializedCalls>0&&entry.record&&entry.record->alive&&!entry.record->disabled,
+            "an expected ARA envelope was not serialized successfully");
+        for(const auto& entry:freeze.components)demand(entry.prepared&&entry.archive,"native save lost its immutable prepared archive authority");
+        for(auto& entry:freeze.components){
+            auto current=captureMetadataForNativeSave(*entry.record);
+            rt.coordinator->validatePreparedEditorArchiveForNativeSave(entry.record->identity.instanceID,*entry.prepared,current);
+        }
+        freeze.precommitPassed=true;++rt.nativeSavePrecommitsAllowed;return true;
+    }catch(const std::exception& e){rt.nativeSaveError=e.what();return false;}
+    catch(...){rt.nativeSaveError="unknown native save precommit failure";return false;}
+}
+void nativeSaveRejected(const NativeSaveRequest&,NativeSaveRejection reason,void*)noexcept{
+    try{auto& rt=runtime();if(rt.nativeSaveError.empty())rt.nativeSaveError=nativeSaveRejection(reason);rt.nativeSaveAlertQueued=true;
+        writeNativeApplicationEvent("native_ara_project_save_refused",rt.nativeSaveError);
+    }catch(...){}
+}
+void nativeSaveFinished(const NativeSaveTransaction& transaction,void*)noexcept{
+    auto& rt=runtime();++rt.nativeSaveFramesFinished;
+    if(transaction.ownerCookie&&rt.nativeSaveFreeze.get()==transaction.ownerCookie){
+        for(auto& entry:rt.nativeSaveFreeze->components){auto& r=*entry.record;
+            r.native->nativeProcessAllowed=entry.previousProcessAllowed&&r.alive&&!r.disabled&&!r.teardown&&!r.initialPrimePending&&r.native->nativeAlive&&!r.native->nativeTerminated;
+            // Guard commitBegun is not actual whole-file success/readback.
+            // Conservatively re-announce real unsaved revisions after a refusal.
+            if(transaction.failed||!rt.nativeSaveFreeze->precommitPassed)r.nativeDirtyRetryAfterSaveRefusal=true;
+        }
+        rt.nativeSaveFreeze.reset();
+    }
+}
+Steinberg::tresult serializeFrozenNativeProjectState(hooks::InstanceRecord& n,BridgeRecord* r,Steinberg::IBStream* stream,
+    hooks::OriginalStateCall& original,const hooks::ThreadInfo& info)noexcept{
+    auto& rt=runtime();try{
+        const auto* transaction=currentNativeSaveTransaction();
+        demand(transaction&&transaction->openAllowed&&!transaction->failed&&info.isMainThread&&r&&sealedNativeCaller(info),"actual native project-save component caller is unavailable");
+        demand(rt.nativeSaveFreeze&&transaction->ownerCookie==rt.nativeSaveFreeze.get()
+            &&sameSaveRequest(transaction->request,rt.nativeSaveFreeze->request),"actual native save has no frozen owner payload");
+        FrozenNativeSaveComponent* frozen=nullptr;for(auto& entry:rt.nativeSaveFreeze->components)if(entry.record==r){frozen=&entry;break;}
+        demand(frozen&&frozen->prepared&&frozen->archive&&r->native==&n&&!r->native->nativeProcessAllowed
+            &&r->native->actualNativeProcessCallsInFlight==0,"component was not frozen/drained by actual native file-open preflight");
+        rt.coordinator->validatePreparedEditorArchiveForNativeSave(r->identity.instanceID,*frozen->prepared,frozen->actualPreflight);
+        auto* ordinary=new lab::fl_app::MemoryIBStream;const auto result=original(ordinary);lab::Bytes bytes=ordinary->bytes();ordinary->release();
+        if(result!=kResultOk){markCurrentNativeSaveFailed();return result;}
+        rt.coordinator->validatePreparedEditorArchiveForNativeSave(r->identity.instanceID,*frozen->prepared,frozen->actualPreflight);
+        lab::FLStandaloneStateEnvelope envelope;envelope.archive=*frozen->archive;envelope.nativeComponentState=std::move(bytes);
+        auto encoded=lab::encodeFLStandaloneStateEnvelope(envelope);lab::fl_app::writeAll(*stream,encoded);
+        ++frozen->serializedCalls;frozen->ordinaryBytes=envelope.nativeComponentState.size();frozen->envelopeBytes=encoded.size();++rt.nativeSaveEnvelopes;
+        r->lastNativeStateCaller=nativeCallerEvidence(info);return result;
+    }catch(const std::exception& e){rt.nativeSaveError=e.what();markCurrentNativeSaveFailed();return kResultFalse;}
+    catch(...){rt.nativeSaveError="unknown failure serializing frozen native ARA envelope";markCurrentNativeSaveFailed();return kResultFalse;}
+}
+ObservedNativeInstance* controllerNode(hooks::InstanceRecord& n)noexcept{
+    auto* node=static_cast<ObservedNativeInstance*>(n.ownerControllerData.load());return node&&node->native==&n?node:nullptr;
+}
+BridgeRecord* publishedControllerOwner(hooks::InstanceRecord& n,Steinberg::Vst::IEditController* actual)noexcept{
+    auto* node=controllerNode(n);if(!node||!actual||!n.nativeAlive||!n.nativeInitialized||n.nativeTerminated
+        ||n.actualController.load()!=actual||node->verifiedController.load()!=actual)return nullptr;
+    auto* r=node->controllerOwner.load();if(!r||r->currentControllerNode.load()!=node||!r->alive||!r->native->nativeAlive
+        ||!r->native->nativeInitialized||r->native->nativeTerminated||r->native->ownerData.load()!=r)return nullptr;
+    return r;
+}
+void publishControllerAssociationOnMain(hooks::InstanceRecord& n)noexcept{
+    if(!pthread_main_np())return;auto* node=controllerNode(n);if(!node)return;
+    auto* controller=n.actualController.load();auto* context=n.actualInitializeContext.load();BridgeRecord* owner=nullptr;
+    if(controller&&context&&n.nativeAlive&&n.nativeInitialized&&!n.nativeTerminated){
+        NativeInsert mapped;
+        if(resolveActualNativeController(reinterpret_cast<std::uintptr_t>(controller),reinterpret_cast<std::uintptr_t>(context),mapped))
+            for(auto* r=runtime().head.load();r;r=r->next.load())if(r->alive&&!r->disabled&&!r->teardown&&r->native->nativeAlive&&r->native->nativeInitialized&&!r->native->nativeTerminated
+                &&r->identity.actualComponent==mapped.actualComponent&&r->native->actualComponent.load()==reinterpret_cast<Steinberg::Vst::IComponent*>(mapped.actualComponent)
+                &&revalidateActualNativeController(r->insert,reinterpret_cast<std::uintptr_t>(controller))){owner=r;break;}
+    }
+    auto* old=node->controllerOwner.load();
+    if(owner&&old==owner&&node->verifiedController.load()==controller&&owner->currentControllerNode.load()==node)return;
+    // A real association change closes the formerly owned cache BEFORE any
+    // publication gap. Unchanged main polls never unpublish a live RT route.
+    if(old)invalidateAssociatedARACache(*old);
+    auto* previous=owner?owner->currentControllerNode.load():nullptr;if(owner&&previous&&previous!=node)invalidateAssociatedARACache(*owner);
+    node->controllerOwner=nullptr;node->verifiedController=nullptr;
+    if(old){auto* expected=node;old->currentControllerNode.compare_exchange_strong(expected,nullptr);}
+    if(!owner)return;
+    node->verifiedController=controller;previous=owner->currentControllerNode.exchange(node);
+    if(previous&&previous!=node){previous->controllerOwner=nullptr;previous->verifiedController=nullptr;}
+    node->controllerOwner=owner;++runtime().separateControllerAssociationsVerified;
+}
+void publishAllControllerAssociationsOnMain()noexcept{
+    if(!pthread_main_np())return;for(auto* node=runtime().observedNativeInstances.load();node;node=node->next.load())publishControllerAssociationOnMain(*node->native);
+}
+BridgeRecord* exactNativeControllerOwner(hooks::InstanceRecord& n,const hooks::ThreadInfo& info)noexcept{
+    if(!info.isMainThread||info.insideNativeProcess||!sealedNativeCaller(info))return nullptr;
+    publishControllerAssociationOnMain(n);return publishedControllerOwner(n,n.actualController.load());
+}
 Steinberg::tresult state(hooks::InstanceRecord& n,hooks::StateOperation operation,Steinberg::IBStream* stream,hooks::OriginalStateCall& original,const hooks::ThreadInfo& info,void*)noexcept{
-    if(!stream)return kResultFalse;
+    if(!stream){markActiveNativeSaveFailedFromAnyThread();return kResultFalse;}
     auto* r=record(n);
+    // Off-main has no authority to inspect the native Save stack. Its exact
+    // hook record can still fail a live transaction through the RT-safe latch.
+    if(!info.isMainThread&&markActiveNativeSaveFailedFromAnyThread()
+        &&operation!=hooks::StateOperation::ComponentGetState)return kResultFalse;
     try{
         if(operation==hooks::StateOperation::ControllerSetComponentState){
+            if(currentNativeSaveTransaction()){
+                markCurrentNativeSaveFailed();runtime().nativeSaveError="native controller state replacement reentered an active project save";return kResultFalse;
+            }
             if(!lab::fl_app::peekMagicAndRestorePosition(*stream))return original(stream);
+            if(r&&(!r->alive||r->disabled||r->teardown))r=nullptr;
+            if(!r)r=exactNativeControllerOwner(n,info);
+            if(!r){
+                // No proven cross-record controller/component association exists.
+                // Leave the recognized stream position/bytes untouched, refuse
+                // before original, and protect whole-file saves for this live
+                // actual native record. Never guess by factory/creation order.
+                preserveUnboundARA(n);
+                if(info.isMainThread)runtime().error="recognized ARA controller state has no proven bound component association";
+                return kResultFalse;
+            }
             auto envelope=lab::decodeFLStandaloneStateEnvelope(lab::fl_app::readRemaining(*stream));demand(envelope.has_value(),"recognized native envelope decode failed");
             auto* ordinary=new lab::fl_app::MemoryIBStream(envelope->nativeComponentState);const auto result=original(ordinary);ordinary->release();return result;
         }
+        if(operation==hooks::StateOperation::ComponentGetState){
+            if(n.ownerStateFlags.load()&protectedUnboundArchive){markCurrentNativeSaveFailed();return kResultFalse;}
+            const auto* transaction=currentNativeSaveTransaction();
+            if(!transaction)return original(stream); // Presets/diagnostics remain ordinary SDK state.
+            if(!r)return original(stream); // Expected bound records are checked before destructive commit.
+            return serializeFrozenNativeProjectState(n,r,stream,original,info);
+        }
+        if(currentNativeSaveTransaction()){
+            markCurrentNativeSaveFailed();runtime().nativeSaveError="native component state replacement reentered an active project save";return kResultFalse;
+        }
         if(r&&!info.isMainThread){r->fault=true;return kResultFalse;}
         if(!r){
-            constexpr std::uint32_t refusedNativeArchive=1u;
-            if(operation==hooks::StateOperation::ComponentGetState){
-                if(n.ownerStateFlags.load()&refusedNativeArchive)return kResultFalse;
-                return original(stream);
-            }
             if(lab::fl_app::peekMagicAndRestorePosition(*stream)){
-                n.ownerStateFlags.fetch_or(refusedNativeArchive);runtime().unboundArchiveRefusals.fetch_add(1);return kResultFalse;
+                preserveUnboundARA(n);return kResultFalse;
             }
             return original(stream);
         }
         if(r->disabled){
-            if(operation==hooks::StateOperation::ComponentGetState||lab::fl_app::peekMagicAndRestorePosition(*stream))return kResultFalse;
+            if(lab::fl_app::peekMagicAndRestorePosition(*stream))return kResultFalse;
             return original(stream);
         }
-        if(operation==hooks::StateOperation::ComponentGetState&&r->pendingArchive){
-            r->error="Save is unavailable until the pending ARA archive matches actual current native project RAM";return kResultFalse;
-        }
-        if(operation==hooks::StateOperation::ComponentGetState&&!r->graphApplied&&!r->pendingArchive)return original(stream);
         // Ordinary native state restore can precede setupProcessing.
         if(operation==hooks::StateOperation::ComponentSetState&&!r->setupQualified){
             const bool magic=lab::fl_app::peekMagicAndRestorePosition(*stream);r->pendingLoad=loadAuthority(*r,info);
@@ -425,18 +704,6 @@ Steinberg::tresult state(hooks::InstanceRecord& n,hooks::StateOperation operatio
             r->fault=false;r->error="ARA project state requires stopping native FL playback first";return kResultFalse;
         }
         Boundary boundary(*r);
-        if(operation==hooks::StateOperation::ComponentGetState){
-            demand(sealedNativeCaller(info),"ARA envelope serialization requires the actual sealed native FL state caller");
-            r->lastNativeStateCaller=nativeCallerEvidence(info);writeNativeApplicationEvent("actual_native_component_getState_authority",r->identity.instanceID+" "+r->lastNativeStateCaller);
-            demand(!r->pendingArchive,"save refused while recognized ARA archive still awaits matching actual native RAM");
-            auto* ordinary=new lab::fl_app::MemoryIBStream;const auto result=original(ordinary);lab::Bytes bytes=ordinary->bytes();ordinary->release();
-            if(result!=kResultOk)return result;
-            observeAndRequireNativeMixBoundary(*r);
-            refreshAtBoundary(*r,false);const auto snapshot=runtime().coordinator->captureActualCurrentSnapshot(r->identity.instanceID);
-            lab::FLStandaloneStateEnvelope envelope;envelope.nativeComponentState=std::move(bytes);
-            envelope.archive=runtime().coordinator->captureArchiveOnly(r->identity.instanceID,snapshot);
-            lab::fl_app::writeAll(*stream,lab::encodeFLStandaloneStateEnvelope(envelope));return result;
-        }
         const bool magic=lab::fl_app::peekMagicAndRestorePosition(*stream);r->pendingLoad=loadAuthority(*r,info);
         if(!magic){
             const auto snapshot=runtime().coordinator->captureActualCurrentSnapshot(r->identity.instanceID);
@@ -502,7 +769,7 @@ void ensureOverlayAtModelBoundary(){
     demand(rt.anyBoundary&&app.engineReady,"source hook installation needs actual verified model boundary");
     if(!rt.overlay){lab::FLStandaloneOverlayConfig config;config.actualEngineImageBase=app.engine.imageBase;
         config.exactLoadedEnginePath=app.enginePath;config.exactEngineArm64SliceSHA256=app.engine.verifiedArm64SliceSHA256;
-        config.confirmAlreadyAdmittedOwnedProcess=admitted;config.confirmStoppedDrainedNativeModelBoundary=allBoundary;config.ownerFaultQueued=&rt.overlayFault;
+        config.confirmAlreadyAdmittedOwnedProcess=admitted;config.confirmStoppedDrainedNativeModelBoundary=allBoundary;config.ownerFaultQueued=&rt.overlayFault;config.ownerStaleHoldQueued=&rt.overlayStaleHoldQueued;
         rt.overlay=std::make_unique<lab::FLStandaloneSourceOverlay>(std::move(config));rt.overlayListener.store(rt.overlay.get(),std::memory_order_release);
     }
     if(!rt.overlayInstalled){const auto installed=rt.overlay->installLoadedNativeSourceHook();rt.overlayInstalled=installed.installed;demand(installed.installed,installed.reason.c_str());}
@@ -511,7 +778,7 @@ void setup(hooks::InstanceRecord& n,const Steinberg::Vst::ProcessSetup& setup,St
     auto* r=record(n);if(!r)return;
     r->sampleRate=setup.sampleRate;r->setupQualified=result==kResultOk&&setup.sampleRate==48000&&setup.symbolicSampleSize==Steinberg::Vst::kSample32;r->dirty=true;
     if(r->nativeCacheGate)r->nativeCacheGate->invalidate();
-    if(!r->setupQualified||!info.isMainThread||!stopped())return;
+    if(!r->setupQualified||!info.isMainThread||!stopped()||currentNativeSaveTransaction())return;
     // The actual original setupProcessing has returned. Prime synchronously
     // before FL can start original processing, ONLY after the owned worker proves
     // that main holds no outer recursive native mix lock.
@@ -542,33 +809,56 @@ void beforeTerminate(hooks::InstanceRecord& n,void*,const hooks::ThreadInfo& inf
     }catch(const std::exception& e){fail(*r,e.what());}
     catch(...){fail(*r,"unknown native SDK lifecycle exception");}
 }
-void terminated(hooks::InstanceRecord& n,void*,Steinberg::tresult result,const hooks::ThreadInfo&,void*)noexcept{
+void terminated(hooks::InstanceRecord& n,void*,Steinberg::tresult result,const hooks::ThreadInfo& info,void*)noexcept{
     if(auto* r=record(n))try{runtime().coordinator->observeOriginalTerminateResult(r->identity.instanceID,result);r->alive=false;}catch(const std::exception& e){fail(*r,e.what());}
     catch(...){fail(*r,"unknown native SDK lifecycle exception");}
 }
-void invalidateEveryLiveARACache()noexcept{
-    // Native public parameter notifications may be RT. Shared handlers cannot
-    // identify an insert: invalidate all stable published records conservatively.
-    for(auto* r=runtime().head.load(std::memory_order_acquire);r;r=r->next.load(std::memory_order_acquire))if(r->alive.load()&&r->nativeCacheGate){
-        r->nativeCacheGate->invalidate();r->dirty=true;
-    }
+void invalidateAssociatedARACache(BridgeRecord& r)noexcept{
+    if(!r.alive||!r.native->nativeAlive||r.native->nativeTerminated||!r.nativeCacheGate)return;markActiveNativeSaveFailedFromAnyThread();
+    r.nativeCacheGate->invalidate();r.dirty=true;queueNativeStopForCacheRebuild(r,r.nativeCacheGate->currentTicket().epoch);
 }
 void nativeProcessTelemetry(hooks::InstanceRecord& n,const hooks::NativeProcessTelemetry& observation,const hooks::ThreadInfo& info,void*)noexcept{
     if(auto* r=record(n))if(r->nativeProcessObserver)r->nativeProcessObserver->observe(n,observation,info);
 }
 void inputParameterChanges(hooks::InstanceRecord& n,Steinberg::Vst::IParameterChanges*,Steinberg::int32 count,const hooks::ThreadInfo&,void*)noexcept{
-    // Queue authority identifies this exact actual component. The hook already
-    // obtained the public positive count; owner performs no SDK query or lookup.
-    if(count>0)if(auto* r=record(n))if(r->alive.load()&&r->nativeCacheGate){r->nativeCacheGate->invalidate();r->dirty=true;}
+    if(count>0)if(auto* r=record(n)){r->nativeInputQueueParameterNotifications.fetch_add(1);invalidateAssociatedARACache(*r);}
 }
-void parameterEdit(hooks::InstanceRecord*,Steinberg::Vst::IComponentHandler*,Steinberg::Vst::ParamID,Steinberg::Vst::ParamValue,const hooks::ThreadInfo&,void*)noexcept{invalidateEveryLiveARACache();}
-void parameterNormalized(hooks::InstanceRecord&,Steinberg::Vst::IEditController*,Steinberg::Vst::ParamID,Steinberg::Vst::ParamValue,const hooks::ThreadInfo&,void*)noexcept{invalidateEveryLiveARACache();}
+void controllerHandlerObserved(hooks::InstanceRecord& n,hooks::ControllerHandlerPhase,Steinberg::Vst::IEditController*,
+    Steinberg::Vst::IComponentHandler*,Steinberg::tresult,const hooks::ThreadInfo& info,void*)noexcept{
+    // BeforeOriginal: exact pending handler is already atomic-published by hooks.
+    // Main publishes ownership before native setter can synchronously performEdit.
+    if(info.isMainThread&&!info.insideNativeProcess)publishControllerAssociationOnMain(n);
+}
+void parameterEdit(hooks::InstanceRecord*,Steinberg::Vst::IComponentHandler* actualHandler,Steinberg::Vst::ParamID,Steinberg::Vst::ParamValue,const hooks::ThreadInfo&,void*)noexcept{
+    if(!actualHandler)return;
+    // Stable ARA owners only. The diagnostic first-controller is never routing
+    // authority. A genuinely shared handler invalidates its matching ARA owners.
+    for(auto* r=runtime().head.load();r;r=r->next.load())if(auto* node=r->currentControllerNode.load()){
+        auto& n=*node->native;
+        if((n.actualNativeComponentHandler.load()==actualHandler||n.actualPendingNativeComponentHandler.load()==actualHandler)
+            &&publishedControllerOwner(n,node->verifiedController.load())==r){r->nativeHandlerParameterNotifications.fetch_add(1);invalidateAssociatedARACache(*r);}
+    }
+}
+void parameterNormalized(hooks::InstanceRecord& n,Steinberg::Vst::IEditController* actualController,Steinberg::Vst::ParamID,Steinberg::Vst::ParamValue,const hooks::ThreadInfo& info,void*)noexcept{
+    if(info.isMainThread&&!info.insideNativeProcess)publishControllerAssociationOnMain(n);
+    if(auto* r=publishedControllerOwner(n,actualController)){r->nativeNormalizedParameterNotifications.fetch_add(1);invalidateAssociatedARACache(*r);}
+}
 void fault(const char*,const hooks::ModuleRecord*,const hooks::InstanceRecord* n,const hooks::ThreadInfo&,void*)noexcept{
     if(n)if(auto* r=static_cast<BridgeRecord*>(n->ownerData.load()))r->fault=true;
 }
 void status(){
     auto& rt=runtime();const auto& app=nativeApplication();const auto cacheStats=rt.overlay?rt.overlay->instanceStatsOnModelThread():std::vector<lab::FLStandaloneOverlayInstanceStats>{};NSMutableArray* inserts=[NSMutableArray array];
     for(const auto& r:rt.records){NSMutableDictionary* d=[NSMutableDictionary dictionary];
+        const auto* controller=r->currentControllerNode.load();
+        d[@"controller_association_published"]=@(controller&&publishedControllerOwner(*controller->native,controller->verifiedController.load())==r.get());
+        d[@"controller_native_identity"]=@(controller?controller->native->identity:0);
+        d[@"controller_accepted_handler_address"]=@(controller?reinterpret_cast<std::uintptr_t>(controller->native->actualNativeComponentHandler.load()):0);
+        d[@"controller_pending_handler_address"]=@(controller?reinterpret_cast<std::uintptr_t>(controller->native->actualPendingNativeComponentHandler.load()):0);
+        d[@"scoped_normalized_parameter_notifications"]=@(r->nativeNormalizedParameterNotifications.load());
+        d[@"scoped_handler_parameter_notifications"]=@(r->nativeHandlerParameterNotifications.load());
+        d[@"scoped_input_queue_parameter_notifications"]=@(r->nativeInputQueueParameterNotifications.load());
+        d[@"initial_wait_notice_shown"]=@(r->initialWaitNoticeShown);
+        d[@"native_stop_for_cache_rebuild_pending"]=@(r->nativeStopForRebuildPending.load());d[@"native_stop_requested_epoch"]=@(r->nativeStopRequestedEpoch.load());d[@"actual_native_stops_verified"]=@(r->actualNativeStopsVerified);
         d[@"instance_id"]=@(r->identity.instanceID.c_str());d[@"native_insert"]=@(r->insert.mixerInsert);d[@"bound"]=@YES;
         d[@"static_signature_checked"]=@(r->staticSignatureChecked);d[@"static_signature_valid"]=@(r->staticSignatureValid);d[@"static_signature_status"]=@(r->staticSignatureStatus);
         d[@"static_signature_is_admission_or_license_proof"]=@NO;d[@"plugin_bundle"]=@(r->pluginBundlePath.c_str());
@@ -581,10 +871,15 @@ void status(){
         d[@"native_process_admission_blocked_callbacks"]=@(r->native->blockedProcessCallbacks.load());
         d[@"empty_lifecycle_bind_mix_diagnostic"]=@(nativeMixBoundaryReason(r->lifecycleBindingMixDiagnostic.reason));
         d[@"empty_lifecycle_bind_diagnostic_is_model_boundary_proof"]=@NO;
+        d[@"prepared_ara_archive_available"]=@(r->preparedNativeSave.has_value());
+        d[@"prepared_ara_archive_ticket_authorized"]=@(r->preparedNativeSave&&r->nativeCacheGate->authorizes(r->preparedNativeSave->identity().currentCacheTicket));
+        d[@"native_dirty_pending_ara_revision"]=@(r->nativeDirtyPendingRevision.load());d[@"native_dirty_last_requested_revision"]=@(r->nativeDirtyRequestedRevision);
+        d[@"native_dirty_dispatcher_requests_returned"]=@(r->nativeDirtyRequestsReturned);d[@"native_dirty_ui_readback_proven"]=@NO;
         d[@"last_native_state_caller"]=@(r->lastNativeStateCaller.c_str());d[@"archive_pending_current_ram"]=@(r->pendingArchive.has_value());d[@"error"]=@(r->error.c_str());
         d[@"cache_published"]=@NO;d[@"cache_authorized"]=@NO;
         for(const auto& cache:cacheStats)if(cache.instanceID==r->identity.instanceID){
-            d[@"cache_published"]=@(cache.published);d[@"cache_authorized"]=@(cache.ticketAuthorized);
+            d[@"cache_published"]=@(cache.published);d[@"cache_authorized"]=@(cache.ticketAuthorized);d[@"cache_ticket_epoch"]=@(cache.ticketEpoch);d[@"cache_capture_serial"]=@(cache.captureSerial);d[@"source_stale_hold_active"]=@(cache.staleHoldActive);
+            d[@"source_held_callbacks"]=@(cache.counters.heldCallbacks);d[@"source_held_frames"]=@(cache.counters.heldFrames);d[@"source_stale_hold_requests"]=@(cache.counters.staleHoldRequests);
             d[@"source_applied_callbacks"]=@(cache.counters.appliedCallbacks);d[@"source_applied_frames"]=@(cache.counters.appliedFrames);
             d[@"source_rejected_callbacks"]=@(cache.counters.rejected);d[@"source_fault_bits"]=@(cache.counters.faultBits);
         }
@@ -605,10 +900,23 @@ void status(){
         }
         [inserts addObject:d];}
     NSMutableDictionary* data=[NSMutableDictionary dictionary];data[@"schema"]=@"rysup.fl-ara-runtime-status/1";
+    const auto audioTest=nativeAudioTestStats();
+    data[@"native_audio_test_presentation"]=@{@"configured":@(audioTest.presentationMuteConfigured),@"native_render_calls":@(audioTest.nativeRenderCalls),
+        @"native_rendered_frames":@(audioTest.nativeRenderedFrames),@"native_nonzero_scratch_samples":@(audioTest.nonzeroScratchSamples),@"muted_driver_frames":@(audioTest.mutedFrames),
+        @"native_errors":@(audioTest.nativeErrors),@"unsupported_callbacks":@(audioTest.unsupportedCallbacks),@"concurrent_callbacks":@(audioTest.concurrentCallbacks),
+        @"unsafe_hardware_buffers":@(audioTest.unsafeHardwareBuffers),@"returned_shape_failures":@(audioTest.returnedShapeFailures),@"counter_overflows":@(audioTest.counterOverflows),
+        @"start_refusals":@(audioTest.startRefusals),@"registration_refusals":@(audioTest.registrationRefusals),@"write_only_callback_preparations":@(audioTest.writeOnlyCallbackPreparations),@"critical_property_disarms":@(audioTest.criticalPropertyDisarms),@"configuration_is_render_proof":@NO};
     data[@"admitted_source_profile"]=@{@"sample_rate":@48000,@"channels":@[@1,@2],@"maximum_source_seconds":@300,
         @"maximum_pcm_bytes_per_source":@(64u*1024u*1024u),@"maximum_pcm_bytes_total":@(128u*1024u*1024u),
         @"maximum_source_cache_bytes":@(256u*1024u*1024u),@"reported_latency_head_tail_must_be_zero":@YES,@"limits_are_not_runtime_coverage":@YES};
     data[@"runtime_helper_admitted"]=@(app.admitted);data[@"native_engine_ready"]=@(app.engineReady);data[@"hooks_installed"]=@(rt.hooksInstalled);
+    data[@"native_project_save_guard"]=@{@"initialized":@(rt.nativeSaveGuardInitialized),@"ready":@(nativeSaveGuardReady()),
+        @"protected_unbound_archive_live":@(hasLiveProtectedNativeArchive()),@"record_tracking_incomplete":@(rt.nativeInstanceTrackingIncomplete.load()),
+        @"preflights":@(rt.nativeSavePreflights),@"preflights_allowed":@(rt.nativeSavePreflightsAllowed),@"precommits_allowed":@(rt.nativeSavePrecommitsAllowed),
+        @"envelopes_serialized":@(rt.nativeSaveEnvelopes),@"native_frames_finished":@(rt.nativeSaveFramesFinished),@"active_owner_freeze":@(rt.nativeSaveFreeze!=nullptr),
+        @"last_error":@(rt.nativeSaveError.c_str()),@"whole_file_runtime_save_proven":@NO};
+    data[@"controller_state_association_checks_passed"]=@(rt.separateControllerAssociationsVerified);
+    data[@"native_observed_state_dirty_requests_returned"]=@(rt.nativeObservedStateDirtyRequestsReturned);
     data[@"source_overlay_installed"]=@(rt.overlayInstalled);data[@"inserts"]=inserts;data[@"error"]=@(rt.error.c_str());
     NSMutableArray* ownWindows=[NSMutableArray array];
     for(NSWindow* window in NSApp.windows){NSMutableDictionary* item=[NSMutableDictionary dictionary];
@@ -626,6 +934,10 @@ void status(){
     if(json)[json writeToFile:@((app.runDirectory+"/fl-ara-status.json").c_str()) atomically:YES];
 }
 void tick(const NativeApplication& app,void*)noexcept{
+    pollNativeSaveGuardTransactions();
+    // A vendor may pump a nested run loop while its native Save frame owns a
+    // foreign lock. Never enter any model/cache/ARA SDK operation there.
+    if(currentNativeSaveTransaction())return;
     auto& rt=runtime();if(rt.inTick)return;rt.inTick=true;
     struct Reset{bool& flag;~Reset(){flag=false;}} reset{rt.inTick};
     try{
@@ -643,7 +955,7 @@ void tick(const NativeApplication& app,void*)noexcept{
         }
         if(!rt.overlay&&app.engineReady){lab::FLStandaloneOverlayConfig config;config.actualEngineImageBase=app.engine.imageBase;
             config.exactLoadedEnginePath=app.enginePath;config.exactEngineArm64SliceSHA256=app.engine.verifiedArm64SliceSHA256;
-            config.confirmAlreadyAdmittedOwnedProcess=admitted;config.confirmStoppedDrainedNativeModelBoundary=allBoundary;config.ownerFaultQueued=&rt.overlayFault;
+            config.confirmAlreadyAdmittedOwnedProcess=admitted;config.confirmStoppedDrainedNativeModelBoundary=allBoundary;config.ownerFaultQueued=&rt.overlayFault;config.ownerStaleHoldQueued=&rt.overlayStaleHoldQueued;
             rt.overlay=std::make_unique<lab::FLStandaloneSourceOverlay>(std::move(config));
             rt.overlayListener.store(rt.overlay.get(),std::memory_order_release);
 
@@ -658,6 +970,25 @@ void tick(const NativeApplication& app,void*)noexcept{
                 r->dirty=true;r->error="Native Playlist/source changed; ARA source cache awaits actual stopped refresh";
                 rt.coordinator->invalidateSourceCachesAndRequestRebuild(r->identity.instanceID);
             }else fail(*r,"actual native source read violates this source-overlay profile");
+        }
+        if(rt.overlayStaleHoldQueued.exchange(false)&&rt.overlay)for(const auto& hold:rt.overlay->takeStaleHoldsOnModelThread())if(auto* r=rt.byID(hold.instanceID)){
+            if(!r->alive||r->identity.actualComponent!=hold.actualNativeComponent||currentNativeCacheGenerationCoherent(*r))continue;
+            // hold.ticketEpoch identifies the STALE PUBLISHED ticket. Its
+            // difference from gate.currentTicket() is expected, not obsolescence.
+            r->dirty=true;queueNativeStopForCacheRebuild(*r,hold.ticketEpoch);
+        }
+        for(auto& owned:rt.records){auto& r=*owned;if(!r.alive||r.teardown||!r.nativeStopForRebuildPending.exchange(false))continue;
+            if(currentNativeCacheGenerationCoherent(r))continue;
+            std::int32_t raw=-1;
+            if(!readActualNativeTransportState(raw)||(raw!=0&&raw!=1)){
+                r.error="ARA cache hold awaits a verified stopped native transport";r.nativeStopForRebuildPending=true;continue;
+            }
+            const bool wasPlaying=raw==1;
+            if((wasPlaying&&!requestActualNativePlaying(r.insert,false))||!readActualNativeTransportState(raw)||raw!=0){
+                r.error="ARA cache is held; the actual native STOP request was not verified";r.nativeStopForRebuildPending=true;continue;
+            }
+            if(wasPlaying){++r.actualNativeStopsVerified;rt.nativeStopNoticeQueued=true;writeNativeApplicationEvent("actual_native_ara_cache_hold_stopped",r.identity.instanceID);}
+            r.dirty=true; // Remain stopped through the qualified cache rebuild.
         }
         for(auto& owned:rt.records){auto& r=*owned;if(!r.alive)continue;
             if(r.fault.exchange(false)){if(!r.disabled)fail(r,"ARA/native contract fault; this insert is unavailable");
@@ -675,6 +1006,44 @@ void tick(const NativeApplication& app,void*)noexcept{
             catch(const std::exception& e){fail(r,e.what());}
             catch(...){fail(r,"unknown native SDK exception at stopped model boundary");}
         }
+        // A genuine-entry/protected-envelope publication may lose the guard's
+        // precommit failure CAS because commit has already begun. Announce it
+        // conservatively after the native frame, never claim the old Save
+        // included it. Clear before dispatch so concurrent publication survives.
+        for(auto* p=rt.observedNativeInstances.load();p;p=p->next.load()){
+            auto& n=*p->native;if(!n.nativeAlive||n.nativeTerminated||!(n.ownerStateFlags.load()&nativeObservedStateDirtyPending))continue;
+            n.ownerStateFlags.fetch_and(~nativeObservedStateDirtyPending);NativeInsert target;bool resolved=false;
+            if(n.nativeInitialized){
+                if(auto* component=n.actualComponent.load())resolved=resolveActualNativeInsert(reinterpret_cast<std::uintptr_t>(component),reinterpret_cast<std::uintptr_t>(n.actualInitializeContext.load()),target);
+                else if(auto* controller=n.actualController.load())resolved=resolveActualNativeController(reinterpret_cast<std::uintptr_t>(controller),reinterpret_cast<std::uintptr_t>(n.actualInitializeContext.load()),target);
+            }
+            if(resolved&&requestActualNativeProjectDirty(target))++rt.nativeObservedStateDirtyRequestsReturned;
+            else n.ownerStateFlags.fetch_or(nativeObservedStateDirtyPending);
+        }
+        for(auto& node:rt.records){auto& r=*node;if(!r.alive||r.teardown||r.disabled)continue;
+            const auto pending=r.nativeDirtyPendingRevision.load();
+            if(pending>r.nativeDirtyRequestedRevision||r.nativeDirtyRetryAfterSaveRefusal){
+                if(requestActualNativeProjectDirty(r.insert)){r.nativeDirtyRequestedRevision=pending;r.nativeDirtyRetryAfterSaveRefusal=false;++r.nativeDirtyRequestsReturned;}
+            }
+        }
+        std::string initialWaitReason;
+        for(auto& node:rt.records){auto& r=*node;if(r.alive&&!r.teardown&&!r.disabled&&r.initialPrimePending&&r.native->blockedProcessCallbacks.load()>0&&!r.initialWaitNoticeShown){
+            r.initialWaitNoticeShown=true;if(initialWaitReason.empty())initialWaitReason=r.error.empty()?"Source audio preparation is still pending for this insert.":r.error;
+        }}
+        if(!initialWaitReason.empty()){
+            NSAlert* alert=[NSAlert new];alert.messageText=@"ARA is still preparing an insert";
+            alert.informativeText=@((std::string("Playback for this insert is held until its source audio is ready. Stop playback to let preparation finish. ")+initialWaitReason).c_str());
+            [alert addButtonWithTitle:@"Keep session open"];if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];
+        }
+        if(rt.nativeStopNoticeQueued){rt.nativeStopNoticeQueued=false;
+            NSAlert* alert=[NSAlert new];alert.messageText=@"Playback stopped for an ARA edit";
+            alert.informativeText=@"Native FL playback was stopped while changed ARA source caches rebuild. Playback remains stopped; press Play when the insert is ready.";
+            [alert addButtonWithTitle:@"Keep stopped"];if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];
+        }
+        if(rt.nativeSaveAlertQueued){rt.nativeSaveAlertQueued=false;
+            NSAlert* alert=[NSAlert new];alert.messageText=@"FL project save was refused to preserve ARA state";
+            alert.informativeText=@(rt.nativeSaveError.c_str());[alert addButtonWithTitle:@"Keep session open"];
+            if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];}
         if(++rt.ticks%10==0)status();
     }catch(const std::exception& e){rt.error=e.what();writeNativeApplicationEvent("ara_app_bridge_tick_refused",e.what());status();}
     catch(...){rt.error="Unknown native SDK exception in app bridge";writeNativeApplicationEvent("ara_app_bridge_tick_refused",rt.error);}
@@ -686,14 +1055,30 @@ void onAdmitted(const NativeApplication& app,void*)noexcept{
         config.callbacks.instanceCreated=instanceCreated;config.callbacks.initialized=initialized;config.callbacks.state=state;
         config.callbacks.setActiveObserved=setActive;config.callbacks.setupProcessingObserved=setup;config.callbacks.setProcessingObserved=processing;
         config.callbacks.beforeTerminate=beforeTerminate;config.callbacks.terminated=terminated;config.callbacks.fault=fault;
-        config.callbacks.paramEditObserved=parameterEdit;config.callbacks.paramNormalizedObserved=parameterNormalized;config.callbacks.inputParameterChangesObserved=inputParameterChanges;
+        config.callbacks.controllerHandlerObserved=controllerHandlerObserved;config.callbacks.paramEditObserved=parameterEdit;config.callbacks.paramNormalizedObserved=parameterNormalized;config.callbacks.inputParameterChangesObserved=inputParameterChanges;
         if(rt.observeNativeDSP)config.callbacks.nativeProcessTelemetry=nativeProcessTelemetry;
         const auto result=hooks::install(config);rt.hooksInstalled=result.installed;demand(result.installed,result.reason);status();
     }catch(const std::exception& e){runtime().error=e.what();writeNativeApplicationEvent("ara_app_helper_install_failed",e.what());}
     catch(...){runtime().error="Unknown exception installing native bridge";writeNativeApplicationEvent("ara_app_helper_install_failed",runtime().error);}
 }
+bool beforeOriginalCreate(const NativeApplication& app,void*)noexcept{
+    try{auto& rt=runtime();
+        demand(app.startupOwnershipVerified&&app.admitted&&app.engine.imageBase&&rt.hooksInstalled,
+            "owned native engine code/hooks are unavailable before Create");
+        // dlsym has now provided the exact loaded engine binding and code pins.
+        // Admission runs earlier, when this binding intentionally does not exist.
+        NativeSaveGuardCallbacks saveCallbacks;saveCallbacks.preflight=nativeSavePreflight;saveCallbacks.precommit=nativeSavePrecommit;
+        saveCallbacks.rejected=nativeSaveRejected;saveCallbacks.finished=nativeSaveFinished;saveCallbacks.hasLiveARA=hasLiveNativeARA;
+        rt.nativeSaveGuardInitialized=initializeNativeSaveGuard(saveCallbacks);
+        demand(rt.nativeSaveGuardInitialized&&nativeSaveGuardReady(),
+            "required native project-save startup protection is unavailable");
+        writeNativeApplicationEvent("native_project_save_startup_guard_ready");return true;
+    }catch(const std::exception& e){runtime().error=e.what();writeNativeApplicationEvent("native_project_save_startup_guard_unavailable",e.what());return false;}
+    catch(...){return false;}
+}
 __attribute__((constructor)) static void loadBridge(){
-    @autoreleasepool{NativeApplicationCallbacks callbacks;callbacks.admitted=onAdmitted;callbacks.tick=tick;
-        initializeNativeApplication(callbacks);}
+    @autoreleasepool{NativeApplicationCallbacks callbacks;callbacks.admitted=onAdmitted;callbacks.beforeOriginalCreate=beforeOriginalCreate;callbacks.tick=tick;
+        const bool initialized=initializeNativeApplication(callbacks);
+        if(!initialized&&nativeApplication().startupOwnershipVerified)_exit(78);}
 }
 } // namespace rysup::fl_ara::app_bridge

@@ -244,7 +244,7 @@ func ownedStartupRefusalEvent(log: URL, runID: String, pid: Int32) -> String? {
     let size = (try? handle.seekToEnd()) ?? 0
     try? handle.seek(toOffset: size > 65536 ? size - 65536 : 0)
     let text = String(decoding: (try? handle.readToEnd()) ?? Data(), as: UTF8.self)
-    let admitted = Set(["owned_startup_save_guard_refused", "owned_startup_engine_identity_refused"])
+    let admitted = Set(["owned_startup_save_guard_refused", "owned_startup_engine_identity_refused", "owned_startup_create_contract_refused"])
     for line in text.split(separator: "\n").reversed() {
         guard let row = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
               row["run_id"] as? String == runID, row["pid"] as? Int32 == pid,
@@ -493,7 +493,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             DispatchQueue.main.async { self.status.stringValue = message; self.busy = false; self.buttons.forEach { $0.isEnabled = true } }
         }
     }
-    @objc func check() { work { _ = try inspect(self.source); return "Compatible: FL Studio 26.1.7.5421, exact framework hashes and original vendor signature verified." } }
+    @objc func check() { work { _ = try inspect(self.source); return "Reference verified: FL Studio 26.1.7.5421, exact hashes and original vendor signature. Runtime ARA qualification remains pending." } }
     @objc func cleanup() { work { try cleanupFinishedSession(defaultCache()) } }
     @objc func launchEmpty() { start(nil) }
     @objc func openProject() {
@@ -569,8 +569,10 @@ func selfTest() throws {
     }
     let events = base.appendingPathComponent("events.jsonl")
     try Data(("{\"event\":\"owned_startup_save_guard_refused\",\"run_id\":\"another-run\",\"pid\":123}\n" +
-              "{\"event\":\"owned_startup_engine_identity_refused\",\"run_id\":\"test-run\",\"pid\":456}\n").utf8).write(to: events)
+              "{\"event\":\"owned_startup_engine_identity_refused\",\"run_id\":\"test-run\",\"pid\":456}\n" +
+              "{\"event\":\"owned_startup_create_contract_refused\",\"run_id\":\"test-run\",\"pid\":789}\n").utf8).write(to: events)
     guard ownedStartupRefusalEvent(log: events, runID: "test-run", pid: 456) == "owned_startup_engine_identity_refused",
+          ownedStartupRefusalEvent(log: events, runID: "test-run", pid: 789) == "owned_startup_create_contract_refused",
           ownedStartupRefusalEvent(log: events, runID: "test-run", pid: 123) == nil else {
         throw fail("Startup refusal event admitted another run or process.")
     }

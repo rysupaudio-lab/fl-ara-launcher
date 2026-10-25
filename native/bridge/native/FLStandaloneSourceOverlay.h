@@ -24,7 +24,7 @@ enum class FLStandaloneOverlayFault : std::uint8_t {
     OutputShape,SourcePosition,SourceRange,AmbiguousTarget,Count
 };
 enum class FLStandaloneOverlayOutcome : std::uint8_t {
-    Inactive,Unrelated,StaleTicket,Applied,NativeZeroRead,Rejected
+    Inactive,Unrelated,StaleTicket,Applied,NativeZeroRead,Rejected,HeldForRebuild
 };
 struct FLStandaloneOverlayConfig {
     std::uintptr_t actualEngineImageBase=0;
@@ -39,6 +39,10 @@ struct FLStandaloneOverlayConfig {
     // Mandatory stable owner-owned mailbox. Target faults only store true here;
     // root polls/exchanges it and takes detailed faults on its model thread.
     std::atomic<bool>* ownerFaultQueued=nullptr;
+    // Mandatory stable mailbox for expected stale-cache playback holds. RT
+    // stores true only; main drains takeStaleHoldsOnModelThread and performs a
+    // verified real native STOP outside Save. No automatic resume is inferred.
+    std::atomic<bool>* ownerStaleHoldQueued=nullptr;
 };
 struct FLStandaloneOverlayInstallResult {
     bool installed=false;
@@ -50,6 +54,9 @@ struct FLStandaloneOverlayInstallResult {
 // using bounded Mach reads; no full PCM hash, allocation or SDK call occurs RT.
 // Cached native PCM SHA/generation were independently checked at publication;
 // their continuing authority is the batch gate's current ticket on EACH read.
+// A stale ticket never authorizes old edited PCM. A fully sealed affected read
+// may instead hold only its positive returned span with silence while main stops
+// and rebuilds; unknown/unproven sources and native zero-read tails stay intact.
 struct FLStandaloneSourceRead {
     bool voiceRecordRead=false,nativeObservationComplete=false;
     std::uintptr_t voiceObject=0,voiceVMT=0,channelObject=0,channelVMT=0;
@@ -76,6 +83,7 @@ struct FLStandaloneOverlayCounters {
     std::uint64_t appliedCallbacks=0,appliedFrames=0,zeroReadCallbacks=0,rejected=0;
     std::uint64_t faultBits=0;
     std::uint32_t readers=0;
+    std::uint64_t heldCallbacks=0,heldFrames=0,staleHoldRequests=0;
 };
 struct FLStandaloneOverlayInstanceStats {
     std::string instanceID;
@@ -83,6 +91,7 @@ struct FLStandaloneOverlayInstanceStats {
     std::uint64_t captureSerial=0,ticketEpoch=0;
     std::size_t sources=0,regions=0;
     bool published=false,ticketAuthorized=false;
+    bool staleHoldActive=false;
     FLStandaloneOverlayCounters counters;
 };
 struct FLStandaloneOverlayFaultRecord {
@@ -90,6 +99,11 @@ struct FLStandaloneOverlayFaultRecord {
     std::uintptr_t actualNativeComponent=0;
     std::uint64_t captureSerial=0,faultBits=0;
     FLStandaloneOverlayFault firstFault=FLStandaloneOverlayFault::None;
+};
+struct FLStandaloneOverlayStaleHoldRecord {
+    std::string instanceID;
+    std::uintptr_t actualNativeComponent=0;
+    std::uint64_t captureSerial=0,ticketEpoch=0;
 };
 
 class FLStandaloneSourceOverlay {
@@ -129,6 +143,7 @@ public:
     FLStandaloneOverlayCounters counters()const noexcept;
     std::vector<FLStandaloneOverlayInstanceStats> instanceStatsOnModelThread()const;
     std::vector<FLStandaloneOverlayFaultRecord> takeFaultsOnModelThread();
+    std::vector<FLStandaloneOverlayStaleHoldRecord> takeStaleHoldsOnModelThread();
     // Actual root native hold/drain required. Restores only our own source VMT
     // data slot to its original, drains readers, retires tables on model thread.
     void shutdownAtNativeBoundary();

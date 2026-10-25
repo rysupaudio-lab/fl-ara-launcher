@@ -1,0 +1,321 @@
+{
+  "schema": "rysup.fl-ara-runtime-source-import/1",
+  "candidate": "r3-scoped-parameters",
+  "upstream_source_freeze_sha256": "59702f61a121ac22d3ce2e9ffaaf21f7e5278278e87909278bff1fa20881a630",
+  "compile_manifest_sha256": "c89a065c902bdd023723f5bdc91e5d275f79be3fdb83c65d1e97af481e5a8dc8",
+  "compiled_helper_original_sha256": "31c6b6cc3f70d2b53784478a7e08cf4ccb8c3ad4ba14ab5a20c204372610b984",
+  "sdk_source_imported": false,
+  "vendor_binary_or_audio_imported": false,
+  "private_qa_static_review_imported": false,
+  "files": [
+    {
+      "path": "NATIVE_COMPONENT_CONTROLLER_ASSOCIATION.md",
+      "sha256": "36830ef89a40830071538fca1d22cc8d323b5e909c760902072cd7cc03aaab77",
+      "bytes": 4873,
+      "frozen_sha256": "f9bbed7c4d6b7d18acf838fb5fef80af867d4561a5b959505cccf61d6f9bd544",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "PROJECT_ARGUMENT.md",
+      "sha256": "cf91c82b4c8303d5c20307ad76bcd9d3cdec3b461efde842af822cf90e707b02",
+      "bytes": 2109,
+      "frozen_sha256": "0ec3d1af1edefe528060ca031d8368b55778643c6045065118181a40d9f9532c",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "SAVE_FAILURE_SAFETY.md",
+      "sha256": "c30efd7be7ce669c6c2032caef9da566514f8314a476675392ec081e3c67905d",
+      "bytes": 5821,
+      "frozen_sha256": "301f982ef06cdc41ba44a0f0e94d98018b75730cda1d89f41af692a0fbf932bf",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "STANDALONE_ROUTE.md",
+      "sha256": "d7b66812a942c9ca75d961a44bad93e4881e51407655154bad333a7d08df6e52",
+      "bytes": 10455,
+      "frozen_sha256": "69e12be48a89f9ebdd62573216ca9f631a20ba800673bd3414c4d9a892be3479",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "TRANSPORT_AND_HOLD.md",
+      "sha256": "f3538746d72ed069ae53719d490efa745b3c20d63c50e8a4a882834081cf1ab0",
+      "bytes": 7836,
+      "frozen_sha256": "e0238ec50d578fc072130c6b7c9e8d97e7a99e59d3ae963f9f66e79754cd6a99",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "host/FLStandaloneGraphDecoder.cpp",
+      "sha256": "171af49feae6d66ae14488cc19510ece15bcebdef96f7c316357719467d8a511",
+      "bytes": 51054
+    },
+    {
+      "path": "host/FLStandaloneGraphDecoder.h",
+      "sha256": "41003df09dc925a6d8406067d0f9acf7e5e8412633d2e517f843e6c99db89dad",
+      "bytes": 6868
+    },
+    {
+      "path": "host/FLStandaloneStateEnvelope.cpp",
+      "sha256": "e3848a6f6cea4c1367191259161d5b6878bfd5e9e6ce458c4097d2acd0a9372a",
+      "bytes": 65763
+    },
+    {
+      "path": "host/FLStandaloneStateEnvelope.h",
+      "sha256": "161d8d302bf493cfad84ce1dc59c907ba61eb7fbff488a87398c9366c25f6776",
+      "bytes": 4130
+    },
+    {
+      "path": "host/GenericARAHost.cpp",
+      "sha256": "a967e986c08a849b3582041cbefd0dd14c08cc477ebd02833f4143d9cac189f9",
+      "bytes": 58579
+    },
+    {
+      "path": "host/GenericARAHost.h",
+      "sha256": "917113b0f88205f2c60b0079f45ac7bb4cc62aafe4e3ba522644e4f86c6ca47e",
+      "bytes": 14601
+    },
+    {
+      "path": "host/NATIVE_SAVE_PREPARATION_CONTRACT.md",
+      "sha256": "76c7ae41793c0e41dff9fd4d57a22c0e7255b7a4b9ec9b71f230ae6174d2ad21",
+      "bytes": 5140,
+      "frozen_sha256": "45f8a612b2391b5f8338531846e8b238f8c49b47c738d9a8b7bb78897378e11d",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "host/OWNER_NEUTRAL_HOST_CONTRACT.md",
+      "sha256": "ee2f11d702f1b4ffda8679f404d5c80c9a9b7530d7fe27d12878d6e511a4a1b7",
+      "bytes": 15378,
+      "frozen_sha256": "d191ddf06fd5d50bb9a13de266ae1fdec77c320e5f5e1759526292791a284783",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "host/OwnedVST3PlaybackCompanion.cpp",
+      "sha256": "8bbd7b952f61c10ce12b52cd0f32a91cbeeab83d43ded37fe1710948762a9ea5",
+      "bytes": 16965
+    },
+    {
+      "path": "host/OwnedVST3PlaybackCompanion.h",
+      "sha256": "31c7e476740d622d021cfbdd0f944f82d917052abaa43b8e719a04904570d155",
+      "bytes": 2074
+    },
+    {
+      "path": "host/StandaloneARACoordinator.cpp",
+      "sha256": "3e857c29cf9df3f5cb0de21466253a996dd87931cbbe0880ad425b2654a3c831",
+      "bytes": 40909
+    },
+    {
+      "path": "host/StandaloneARACoordinator.h",
+      "sha256": "2a56a39e2b967b1f826657a75e0dce803b98d229edc88f6380f775abeb2d7936",
+      "bytes": 21949
+    },
+    {
+      "path": "host/StandaloneARAEditRelay.h",
+      "sha256": "18d29a953371c328930b3b1c12747ae9505c57bbac2628d6a499c86fd30b6e6c",
+      "bytes": 949
+    },
+    {
+      "path": "host/StandaloneCacheGate.h",
+      "sha256": "c0521403b4ef1a00e455ec681d8773039640d9300a2af0d98d5c248ec3a76f25",
+      "bytes": 1701
+    },
+    {
+      "path": "host/VST3ARAEntry.cpp",
+      "sha256": "e9c4fd95fec5cd36c7e5efb1a0f5014c5047e4c91817001087cff38f158485bc",
+      "bytes": 3882
+    },
+    {
+      "path": "host/VST3ARAEntry.h",
+      "sha256": "01225911858c375e8b9d82b1544e9c1ee0d578832d33339df890382bdb50f305",
+      "bytes": 2332
+    },
+    {
+      "path": "legacy/FLNativeModel.cpp",
+      "sha256": "daffc8dcac24bb02ed3200677f215eddd75bf873813e9b5c0d324924fb0fd5ba",
+      "bytes": 33697
+    },
+    {
+      "path": "legacy/FLNativeModel.h",
+      "sha256": "a09cea7833361bc4639403db9eb0231b8ec4e019ff9253bc8df15e938b006203",
+      "bytes": 8681
+    },
+    {
+      "path": "native/FLAppBridge.mm",
+      "sha256": "90ef26fd14b1f410638374160f57d6d4df0b9419ee8a93306f0981aebb0d3ef7",
+      "bytes": 95379
+    },
+    {
+      "path": "native/FLNativeApplication.h",
+      "sha256": "d8dfdf9f9dba1bac9065675e5c61747d8718e25312b6027c65a952b4e1d0bd98",
+      "bytes": 3806
+    },
+    {
+      "path": "native/FLNativeApplication.mm",
+      "sha256": "4a17c57e4ee0eeece9ac320b40e8a42263390490eff9fe68888806d6ac4f1742",
+      "bytes": 26710
+    },
+    {
+      "path": "native/FLNativeMixBoundary.cpp",
+      "sha256": "f2b98cc24929ab3a545e7f34a2dba287049406ba6c72433dd54c00eaf8a95ceb",
+      "bytes": 6526
+    },
+    {
+      "path": "native/FLNativeMixBoundary.h",
+      "sha256": "3ecc8121d57eedff16b1f0e1d6b38dd6efd718a63a90cc06fd1717e8bb7c88e8",
+      "bytes": 1564
+    },
+    {
+      "path": "native/FLNativeProcessObserver.cpp",
+      "sha256": "d7cc0a837fd0c6d02d263749e0f5e303a1f370593ee17571d033e516b0a9947d",
+      "bytes": 9799
+    },
+    {
+      "path": "native/FLNativeProcessObserver.h",
+      "sha256": "46b4a2810c9d096cefcc1457cf951faf74b100190beb06b772fa5426cc116caa",
+      "bytes": 3233
+    },
+    {
+      "path": "native/FLNativeSaveGuard.h",
+      "sha256": "bcb4736105b5ffa7d63acfcf7e414e585dc3bed7905e9728ab467fbb2e7185d8",
+      "bytes": 4919
+    },
+    {
+      "path": "native/FLNativeSaveGuard.mm",
+      "sha256": "ab2f1590c8ac9693855dae636f05c452f670beedf54de85d5b4b38b2c782c72b",
+      "bytes": 27603
+    },
+    {
+      "path": "native/FLNativeTransport.h",
+      "sha256": "763eab4ef792146fbe839a7c32af40a0b6e67d624801f16cfd52f9b15952440a",
+      "bytes": 2005
+    },
+    {
+      "path": "native/FLStandaloneSourceOverlay.cpp",
+      "sha256": "9886e1e30610e6fd894fe01caf0d11b28603ea42b0eacf3b556d4f02908e15f9",
+      "bytes": 93790
+    },
+    {
+      "path": "native/FLStandaloneSourceOverlay.h",
+      "sha256": "2756f13be3599faf913cb2fa8e097794cbe18e74a2db30a512f63cfff70e88bc",
+      "bytes": 8498
+    },
+    {
+      "path": "native/FLTestOutputSink.cpp",
+      "sha256": "2099cd788bf41f3913dc94926888d7b3d79ff43bae0ee640c1a7fc7344c0bcda",
+      "bytes": 15056
+    },
+    {
+      "path": "native/FLTestOutputSink.h",
+      "sha256": "0c88c83377ae7ba06085ba197711593bbb152f9232ac156dd0dc27bf0cf50232",
+      "bytes": 4725
+    },
+    {
+      "path": "native/FLVST3NativeHooks.cpp",
+      "sha256": "05471a8f391a321aa580cc22427e080e3455c48385dfc18445c3d7dbabf73cf3",
+      "bytes": 53489
+    },
+    {
+      "path": "native/FLVST3NativeHooks.h",
+      "sha256": "2fb3236aabdf6ca34234f926764a859c886b3da410238a13415a8f47013c0106",
+      "bytes": 16104
+    },
+    {
+      "path": "native/FL_APP_BRIDGE_CONTRACT.md",
+      "sha256": "5327d9070e99ec91c502325429df237a8acd544948bc05ca6a7e1c75c7ca7c0e",
+      "bytes": 17495,
+      "frozen_sha256": "ee55ec6dbc84913209761bdcd336530c830381def26442df6e9432dae8133336",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "native/FL_NATIVE_MIX_BOUNDARY.md",
+      "sha256": "2778e47342088aac492bf695bbd265eb74fdd50eb9ad04d183a5e42f91f0528e",
+      "bytes": 2516,
+      "frozen_sha256": "2f0cb7d988a1b98117cffe1a0d5594f70575996ed11c7706bcbb411c4ba7bcae",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "native/FL_NATIVE_PROCESS_OBSERVER.md",
+      "sha256": "5d2ddfe7116a746d2edf6b0e89058f0a120a0e5d1ca0871da31a390ccec1cb11",
+      "bytes": 4221,
+      "frozen_sha256": "7e813575ebc8fe7e69baeafcf6bbc193b662386d6fcd23c129198938de4b0d8b",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "native/FL_NATIVE_SAVE_GUARD.md",
+      "sha256": "06874836341e6203d06e365231fb68e0f2968730b85e8835fa34fd1f348df1c1",
+      "bytes": 7461,
+      "frozen_sha256": "bb75a97e4b3a0ea37fc82fa048c99ee72814110338a7783c1b9d55a575c45932",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "native/FL_NATIVE_TRANSPORT.md",
+      "sha256": "0ea9e8fee795e9e942bd2244f5ed09aacb8ffa77a541d3fbba794e4542b4af58",
+      "bytes": 3053,
+      "frozen_sha256": "5fb2735f6521f3dedc54d29a3764273e0602ff9ea2a86f15a4d9890e41b50168",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "native/FL_SAVE_GUARD_OPEN_ABI.md",
+      "sha256": "3369945ca66ce52c87b8618ee8f77fc554ee5d82ab51d1aa968450b51ab87fc8",
+      "bytes": 8355,
+      "frozen_sha256": "13a69d07df251551cb316f261db27e7eb9cfa2734b909a7f5ed17a330710fc27",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "native/FL_TEST_OUTPUT_SINK.md",
+      "sha256": "592f6c72c29c29cd7f1cef9c96c94c64bf701cc2e44db0af5c88caa9f2427fa4",
+      "bytes": 7037,
+      "frozen_sha256": "4b34b6e0c1779e4cd455107e546f1f0b04c6513cf9c8d14fc35957ddb9305bec",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "native/FL_WRAPPER_POINTER_ASSOCIATION.md",
+      "sha256": "32b4dc369a8852edd6e572bd1eeb350ef676cbcf6da2cc1aff5f173ba56a7d5d",
+      "bytes": 8191,
+      "frozen_sha256": "e24b5788200ba81d854fe11b81b507c9cd8f3002ed56383e22fa0bcba9b2b341",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "native/RegistrationReadThrough.h",
+      "sha256": "a11c9ed22d4a31e0cabd1947f37786163ac9adf73702c294410e52660ad9421a",
+      "bytes": 955
+    },
+    {
+      "path": "native/RegistrationReadThrough.mm",
+      "sha256": "08096b2dc4071d92fbba0d18f11ae16fca72e789b16314d3ecba3bad067ddbfa",
+      "bytes": 20658
+    },
+    {
+      "path": "native/STALE_PLAYBACK_HOLD_CONTRACT.md",
+      "sha256": "232bc695ad1a9fb88c87f4090f9ea4129512fdcbb57da68309a26c925b1a758b",
+      "bytes": 5137,
+      "frozen_sha256": "13f6338c553d1174d207cf5d68690cd4ec0295b1dc7d15dadd029c40f875eec2",
+      "public_doc_transform": "remove_private_lab_evidence_and_historical_test_totals"
+    },
+    {
+      "path": "native/build_helper.py",
+      "sha256": "962edc79024cfe272212c54c6c6afe6d4c97ce8a48d8357a5985aecee8d23e45",
+      "bytes": 7541
+    }
+  ],
+  "public_doc_redactions": [
+    "NATIVE_COMPONENT_CONTROLLER_ASSOCIATION.md",
+    "PROJECT_ARGUMENT.md",
+    "SAVE_FAILURE_SAFETY.md",
+    "STANDALONE_ROUTE.md",
+    "TRANSPORT_AND_HOLD.md",
+    "host/NATIVE_SAVE_PREPARATION_CONTRACT.md",
+    "host/OWNER_NEUTRAL_HOST_CONTRACT.md",
+    "native/FL_APP_BRIDGE_CONTRACT.md",
+    "native/FL_NATIVE_MIX_BOUNDARY.md",
+    "native/FL_NATIVE_PROCESS_OBSERVER.md",
+    "native/FL_NATIVE_SAVE_GUARD.md",
+    "native/FL_NATIVE_TRANSPORT.md",
+    "native/FL_SAVE_GUARD_OPEN_ABI.md",
+    "native/FL_TEST_OUTPUT_SINK.md",
+    "native/FL_WRAPPER_POINTER_ASSOCIATION.md",
+    "native/STALE_PLAYBACK_HOLD_CONTRACT.md"
+  ],
+  "runtime_qualified": false,
+  "normal_app_integration_qualified": false,
+  "third_party_qualified": false,
+  "published": false
+}

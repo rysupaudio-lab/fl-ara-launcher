@@ -75,8 +75,8 @@ after signing the helper and before signing the application.
 
 Packaging produces a drag-to-Applications DMG, ZIP and SHA-256 receipt. Signing,
 notarization, normal-app testing, third-party compatibility qualification and
-public distribution are separate recorded states. This source currently provides
-no finished installable package; the native helper remains integration-owned.
+public distribution are separate recorded states. Builds produce owner-local qualification packages. A qualified public release
+still requires actual normal-app and third-party runtime evidence.
 
 CLI: `--version`, `--check`, `--fl PATH`, `--cache PATH`, `--cleanup`,
 `--test-device "Pro Tools Audio Bridge 2-A_UID"`, or one backed-up `.flp` path. No hidden

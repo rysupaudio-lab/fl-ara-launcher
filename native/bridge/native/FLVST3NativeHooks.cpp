@@ -565,6 +565,18 @@ tresult PLUGIN_API controllerSetComponentHandler(void* self,Vst::IComponentHandl
     auto function=original<tresult(PLUGIN_API *)(void*,Vst::IComponentHandler*)>(slot,16);
     if(bypass()||!actualObject(slot,self))return function(self,handler);
     HookScope scope;
+    auto& instance=*slot->instance;auto* runtime=slot->runtime;
+    struct PendingHandlerScope {
+        InstanceRecord& instance;Vst::IComponentHandler* previous;
+        bool restored=false;
+        PendingHandlerScope(InstanceRecord& value,Vst::IComponentHandler* actual)noexcept
+            :instance(value),previous(value.actualPendingNativeComponentHandler.exchange(actual,std::memory_order_acq_rel)){}
+        void restore()noexcept{instance.actualPendingNativeComponentHandler.store(previous,std::memory_order_release);restored=true;}
+        ~PendingHandlerScope(){if(!restored)restore();}
+    } pending(instance,handler);
+    if(callbacks(runtime)&&runtime->config.callbacks.controllerHandlerObserved)
+        runtime->config.callbacks.controllerHandlerObserved(instance,ControllerHandlerPhase::BeforeOriginal,
+            static_cast<Vst::IEditController*>(self),handler,kInternalError,threadInfo(),runtime->config.callbackContext);
     // Public SDK setter is a UI-thread call. Registration touches metadata only
     // there; unexpected processing/background calls still forward exactly once.
     // Publish before that call to catch a synchronous performEdit from it. This
@@ -577,7 +589,11 @@ tresult PLUGIN_API controllerSetComponentHandler(void* self,Vst::IComponentHandl
         }catch(...){fault(slot->runtime,"actual_native_handler_registration_failed",slot->factory?slot->factory->module:nullptr,slot->instance);}
     }
     const auto result=function(self,handler);
-    if(result==kResultOk)slot->instance->actualNativeComponentHandler.store(handler,std::memory_order_release);
+    if(result==kResultOk)instance.actualNativeComponentHandler.store(handler,std::memory_order_release);
+    pending.restore();
+    if(callbacks(runtime)&&runtime->config.callbacks.controllerHandlerObserved)
+        runtime->config.callbacks.controllerHandlerObserved(instance,ControllerHandlerPhase::AfterOriginal,
+            static_cast<Vst::IEditController*>(self),handler,result,threadInfo(),runtime->config.callbackContext);
     return result;
 }
 tresult PLUGIN_API handlerPerformEdit(void* self,Vst::ParamID id,Vst::ParamValue value) {

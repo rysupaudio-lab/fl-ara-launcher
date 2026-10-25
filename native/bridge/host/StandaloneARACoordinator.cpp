@@ -1,6 +1,7 @@
 #include "StandaloneARACoordinator.h"
 #include "VST3ARAEntry.h"
 #include "OwnedVST3PlaybackCompanion.h"
+#include "StandaloneARAEditRelay.h"
 #include <pluginterfaces/vst/ivstaudioprocessor.h>
 #include <algorithm>
 #include <cstdio>
@@ -55,6 +56,15 @@ struct CapturedStandaloneSnapshot::Impl {
 CapturedStandaloneSnapshot::CapturedStandaloneSnapshot(std::shared_ptr<const Impl> value):p(std::move(value)){}
 const StandaloneSnapshotData& CapturedStandaloneSnapshot::data()const noexcept{return p->data;}
 std::uint64_t CapturedStandaloneSnapshot::captureSerial()const noexcept{return p->serial;}
+struct PreparedEditorArchive::Impl {
+    PreparedEditorArchiveIdentity identity;
+    StandaloneSavedEditorArchive archive;
+    std::shared_ptr<const void> captureLifetime;
+    const StandaloneSnapshotData* actualSnapshot=nullptr;
+    std::string coordinatorRun;
+};
+PreparedEditorArchive::PreparedEditorArchive(std::shared_ptr<const Impl> value):p(std::move(value)){}
+const PreparedEditorArchiveIdentity& PreparedEditorArchive::identity()const noexcept{return p->identity;}
 
 struct StandaloneARACoordinator::Impl {
     struct Observer final : ModelEditObserver {
@@ -63,15 +73,21 @@ struct StandaloneARACoordinator::Impl {
         std::shared_ptr<StandaloneOwnerAdapter> adapter;
         std::atomic<bool> rebuildQueued{false};
         std::atomic<bool> contractFailed{false};
-        void invalidateForARAEdit(std::uint64_t)noexcept override{
+        StandaloneARAEditRelay actualDirty;
+        void invalidateForARAEdit(std::uint64_t revision)noexcept override{
             const auto ticket=gate->invalidate();
             // Close the gate before invoking any root queue/callback. A prior
             // immutable batch is unauthorized immediately, on this thread.
             adapter->invalidateActualNativeOverlayImmediately(id,ticket.epoch);
+            adapter->queueActualNativeStopForCacheRebuild(id,ticket.epoch);
+            actualDirty.forwardActualRevision(revision,[&](std::uint64_t actual)noexcept{
+                adapter->queueActualNativeDocumentDirtyFromARA(id,actual);
+            });
             if(!rebuildQueued.exchange(true,std::memory_order_acq_rel))adapter->enqueueModelThreadRebuild(id);
         }
         void reportARAContractFailure(const char*)noexcept override{
             contractFailed=true;gate->closePermanently();adapter->invalidateActualNativeOverlayImmediately(id,gate->currentTicket().epoch);
+            adapter->queueActualNativeStopForCacheRebuild(id,gate->currentTicket().epoch);
             try{adapter->showARAUnavailableForInsert(id,"ARA contract failure in this insert; native session remains open");}catch(...){}
         }
     };
@@ -84,6 +100,10 @@ struct StandaloneARACoordinator::Impl {
         std::unique_ptr<HostController> host;
         std::shared_ptr<Observer> observer;
         std::shared_ptr<const CapturedStandaloneSnapshot::Impl> applied;
+        std::shared_ptr<const CapturedStandaloneSnapshot::Impl> currentCacheSnapshot;
+        StandaloneCacheTicket currentCacheTicket;
+        std::uint64_t currentCacheEditRevision=0;
+        bool currentCacheNeedsNoOverlay=false;
         std::atomic<bool> alive{true},active{false},processing{false},uncertain{false},disabled{false};
         std::atomic<bool> activationEver{false},processingEver{false},fresh{true};
         std::atomic<std::uint32_t> stateCalls{0};
@@ -116,7 +136,7 @@ struct StandaloneARACoordinator::Impl {
         requireNativeBoundary(r,allowDisabled);
         demand(r->host->ownedPlaybackLifecycleIdle(),"own ARA model/cache lifecycle is not idle");
     }
-    void validateSnapshot(const std::shared_ptr<Record>& r,const StandaloneSnapshotData& d)const{
+    void validateSnapshot(const std::shared_ptr<Record>& r,const StandaloneSnapshotData& d,bool verifyImmutableProviders=true)const{
         const auto& i=d.actual;const auto& expected=r->identity;const auto& m=d.model;
         demand(i.instanceID==expected.instanceID && i.ownRunID==run && i.ownProcessID==processID()
             && i.actualComponent==expected.actualComponent && i.actualNativeEngineOwner==expected.actualNativeEngineOwner
@@ -136,15 +156,15 @@ struct StandaloneARACoordinator::Impl {
             && d.graph.tracks.size()<=4096 && d.graph.modifications.size()<=100000 && d.graph.regions.size()<=100000,"native snapshot exceeds bounds");
         demand(d.actualVerifiedAudioRecordIndices.size()<=100000 && std::is_sorted(d.actualVerifiedAudioRecordIndices.begin(),d.actualVerifiedAudioRecordIndices.end())
             && std::adjacent_find(d.actualVerifiedAudioRecordIndices.begin(),d.actualVerifiedAudioRecordIndices.end())==d.actualVerifiedAudioRecordIndices.end(),"actual native audio row classifications are duplicate/unsorted/unbounded");
-        demand(d.resolveCurrentImmutableRAMSource && d.sources.size()==d.graph.sources.size()
+        demand((!verifyImmutableProviders || d.resolveCurrentImmutableRAMSource) && d.sources.size()==d.graph.sources.size()
             && d.modifications.size()==d.graph.modifications.size() && d.regions.size()==d.graph.regions.size(),"native source/edit/region authority cardinality differs");
         std::map<std::string,const StandaloneSourceIdentity*> sources;std::map<std::string,const StandaloneModificationIdentity*> mods;
         std::map<std::string,const StandaloneRegionIdentity*> regions;
         for(const auto& s:d.sources)demand(!s.sourceID.empty() && !s.nativePhysicalSourceKey.empty() && validSHA(s.actualPCM_SHA256)
             && sources.emplace(s.sourceID,&s).second,"native source physical/PCM identity missing/duplicate");
         for(const auto& s:d.graph.sources){demand(sources.count(s.id) && s.sampleRate==48000 && (s.channelCount==1 || s.channelCount==2) && s.sampleCount>0,"unqualified or unbound current native source");
-            auto provider=d.resolveCurrentImmutableRAMSource(s);demand(provider!=nullptr,"actual current immutable RAM provider absent");const auto actual=provider->describe();
-            demand(actual.id==s.id && actual.sampleRate==s.sampleRate && actual.sampleCount==s.sampleCount && actual.channelCount==s.channelCount,"actual current RAM provider format/identity differs");}
+            if(verifyImmutableProviders){auto provider=d.resolveCurrentImmutableRAMSource(s);demand(provider!=nullptr,"actual current immutable RAM provider absent");const auto actual=provider->describe();
+                demand(actual.id==s.id && actual.sampleRate==s.sampleRate && actual.sampleCount==s.sampleCount && actual.channelCount==s.channelCount,"actual current RAM provider format/identity differs");}}
         for(const auto& mod:d.modifications)demand(!mod.modificationID.empty() && !mod.nativePhysicalEditKey.empty() && sources.count(mod.sourceID)
             && mods.emplace(mod.modificationID,&mod).second,"native modification physical/source identity missing/duplicate");
         for(const auto& mod:d.graph.modifications)demand(mods.count(mod.id) && mods.at(mod.id)->sourceID==mod.sourceID,"Graph modification is not actual native edit/source identity");
@@ -251,6 +271,53 @@ StandaloneSavedEditorArchive StandaloneARACoordinator::captureArchiveOnly(const 
     saved.native=snapshot.data().model;saved.actualCopiedNativeModelRecords=snapshot.data().actualCopiedNativeModelRecords;
     saved.actualVerifiedAudioRecordIndices=snapshot.data().actualVerifiedAudioRecordIndices;saved.ara=r->host->captureArchiveOnly();p->requireHold(r);return saved;
 }
+PreparedEditorArchive StandaloneARACoordinator::prepareEditorArchiveForNativeSave(const std::string& id,const CapturedStandaloneSnapshot& snapshot){
+    p->requireMain();demand(!p->operation,"native-save preparation cannot reenter an ARA model operation");auto r=p->find(id);p->requireHold(r);
+    demand(snapshot.p && snapshot.p->coordinatorRun==p->run && r->graphReady && r->applied && r->currentCacheSnapshot
+        && standaloneNativeSaveSnapshotMatches(r->currentCacheSnapshot->data,snapshot.data(),false),"native-save preparation requires the exact current published source-cache model");
+    const auto ticket=r->currentCacheTicket;const auto editRevision=r->host->editNotificationRevision();
+    demand(r->observer->gate->authorizes(ticket) && editRevision==r->currentCacheEditRevision
+        && r->currentCacheNeedsNoOverlay==snapshot.data().graph.regions.empty(),"native-save preparation requires an authorized stable source-cache or genuine no-overlay batch");
+    // The ordinary native getState is not called or observed here. This public
+    // method runs the genuine ARA capture at its normal worker-free boundary.
+    auto saved=captureArchiveOnly(id,snapshot);
+    p->requireHold(r);
+    if(r->host->editNotificationRevision()!=editRevision || !r->observer->gate->authorizes(ticket))
+        throw SourceCacheNotReady("ARA archive preparation flushed a model edit; rebuild caches before preparing native save");
+    auto prepared=std::make_shared<PreparedEditorArchive::Impl>();prepared->archive=std::move(saved);
+    prepared->coordinatorRun=p->run;prepared->captureLifetime=snapshot.p;prepared->actualSnapshot=&snapshot.data();
+    prepared->identity={r->identity,snapshot.data().model,ticket,snapshot.captureSerial(),editRevision,r->currentCacheNeedsNoOverlay};
+    if(r->host->editNotificationRevision()!=editRevision || !r->observer->gate->authorizes(ticket))
+        throw SourceCacheNotReady("ARA model changed while completing native-save preparation");
+    return PreparedEditorArchive(std::move(prepared));
+}
+StandaloneSavedEditorArchive StandaloneARACoordinator::validatePreparedEditorArchiveForNativeSave(const std::string& id,
+    const PreparedEditorArchive& prepared,const StandaloneSnapshotData& actualCurrentNativeRAM)const{
+    // Intentionally NO requireMain/requireHold adapter callback, provider
+    // callback, native read, model polling or SDK call in this path. The owner
+    // supplies its actual direct-RAM capture made at native file-open preflight.
+    demand(std::this_thread::get_id()==p->modelThread && !p->operation,"prepared native save validation requires its model thread outside ARA operations");
+    auto r=p->find(id);
+    demand(prepared.p && prepared.p->coordinatorRun==p->run && prepared.p->actualSnapshot && prepared.p->captureLifetime
+        && r->host && r->alive && !r->disabled && !r->observer->contractFailed && !r->uncertain && !r->preparedTerminate && !r->terminated
+        && r->graphReady && r->applied && r->currentCacheSnapshot,"prepared native archive is unavailable or belongs to a different coordinator");
+    p->validateSnapshot(r,actualCurrentNativeRAM,false);
+    const auto& identity=prepared.p->identity;const auto& original=*prepared.p->actualSnapshot;
+    demand(identity.actual.instanceID==id && identity.actual.actualComponent==r->identity.actualComponent
+        && identity.currentCacheTicket.epoch==r->currentCacheTicket.epoch
+        && identity.actualEditNotificationRevision==r->currentCacheEditRevision
+        && identity.noSourceOverlayRequired==r->currentCacheNeedsNoOverlay
+        && standaloneNativeSaveSnapshotMatches(original,actualCurrentNativeRAM)
+        && standaloneNativeSaveSnapshotMatches(r->currentCacheSnapshot->data,actualCurrentNativeRAM,false)
+        && standaloneNativeSaveSnapshotMatches(r->applied->data,actualCurrentNativeRAM,false),
+           "prepared native archive no longer matches actual insert/source/graph/records/PCM/clock/cache authority");
+    demand(r->host->editNotificationRevision()==identity.actualEditNotificationRevision
+        && r->observer->gate->authorizes(identity.currentCacheTicket),"prepared native archive is stale, dirty or lacks its current cache ticket");
+    auto archive=prepared.p->archive;
+    demand(r->host->editNotificationRevision()==identity.actualEditNotificationRevision
+        && r->observer->gate->authorizes(identity.currentCacheTicket),"prepared native archive became dirty while freezing the save transaction");
+    return archive;
+}
 StandaloneArchiveRestoreReceipt StandaloneARACoordinator::restoreArchiveBeforeOriginalState(const std::string& id,const StandaloneSavedEditorArchive& saved,
     StandaloneArchiveSourceValidator& validator,StandaloneArchiveApplication mode){
     p->requireMain();Operation operation(p->operation);auto r=p->find(id);r->observer->invalidateForARAEdit(0);
@@ -306,6 +373,8 @@ StandaloneSourceCacheBatch StandaloneARACoordinator::rebuildWholeSourceCaches(co
     demand(!r->host->callbackFailed(),"actual ARA source callback failed during source cache build");
     if(r->host->editNotificationRevision()!=editRevision || !r->observer->gate->publishIfUnchanged(ticket))
         throw SourceCacheNotReady("actual ARA/native model changed during source cache render; poll/capture/rebuild before publication");
+    r->currentCacheSnapshot=snapshot.p;r->currentCacheTicket=ticket;r->currentCacheEditRevision=editRevision;
+    r->currentCacheNeedsNoOverlay=batch.noSourceOverlayRequired;
     r->phase=batch.noSourceOverlayRequired?"current-native-model-authorized-no-source-overlay":"current-native-source-caches-published";return batch;
 }
 std::shared_ptr<StandaloneCacheGate> StandaloneARACoordinator::cacheGate(const std::string& id)const{return p->find(id)->observer->gate;}
@@ -317,7 +386,7 @@ void StandaloneARACoordinator::observeOriginalSetStateResult(const std::string& 
     if(r->stateCalls.fetch_add(1)==std::numeric_limits<std::uint32_t>::max()){r->stateCalls=std::numeric_limits<std::uint32_t>::max();disableARAForInsert(id,"Native plug-in state-call counter exhausted");}
     if(result!=Steinberg::kResultOk)disableARAForInsert(id,"Native plug-in state restore failed; ARA disabled for this insert and native session retained");}
 void StandaloneARACoordinator::invalidateSourceCachesAndRequestRebuild(const std::string& id)noexcept{try{p->find(id)->observer->invalidateForARAEdit(0);}catch(...){}}
-void StandaloneARACoordinator::disableARAForInsert(const std::string& id,const std::string& reason)noexcept{try{auto r=p->find(id);r->disabled=true;r->observer->gate->closePermanently();p->adapter->invalidateActualNativeOverlayImmediately(id,r->observer->gate->currentTicket().epoch);p->adapter->showARAUnavailableForInsert(id,reason);}catch(...){}}
+void StandaloneARACoordinator::disableARAForInsert(const std::string& id,const std::string& reason)noexcept{try{auto r=p->find(id);r->disabled=true;r->observer->gate->closePermanently();p->adapter->invalidateActualNativeOverlayImmediately(id,r->observer->gate->currentTicket().epoch);p->adapter->queueActualNativeStopForCacheRebuild(id,r->observer->gate->currentTicket().epoch);p->adapter->showARAUnavailableForInsert(id,reason);}catch(...){}}
 StandaloneCoordinatorRecord StandaloneARACoordinator::record(const std::string& id)const{p->requireMain();auto r=p->find(id);const bool disabled=r->disabled || r->observer->contractFailed;return {r->identity,bool(r->host),r->graphReady,disabled,r->active.load(),r->processing.load(),r->uncertain.load(),r->activationEver.load(),r->processingEver.load(),r->stateCalls.load(),r->applied?r->applied->serial:0,r->observer->gate->currentTicket().epoch,disabled?"disabled-for-this-insert":r->phase};}
 Graph StandaloneARACoordinator::graphMetadata(const std::string& id)const{p->requireMain();auto r=p->find(id);demand(r->host && r->graphReady && !r->disabled,"standalone current graph unavailable");return r->host->graphMetadata();}
 void StandaloneARACoordinator::prepareForOriginalTerminate(const std::string& id){p->requireMain();Operation operation(p->operation);auto r=p->find(id);

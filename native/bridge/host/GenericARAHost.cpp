@@ -234,6 +234,9 @@ struct HostController::Impl final : ARA::Host::AudioAccessControllerInterface,
         dirty=true;const auto revision=++editNotificationSerial;
         if(editObserver)editObserver->invalidateForARAEdit(revision);
     }
+    void notifyHostGraphInvalidation()noexcept {
+        dirty=true;if(editObserver)editObserver->invalidateForARAEdit(0);
+    }
     ~Impl() {
         AssertionOwnerScope assertionScope(&failed,editObserver.get());
         // Native owner MUST close child editor and suspend all render callbacks first.
@@ -498,7 +501,7 @@ EditorGraphRefreshReceipt HostController::reconcileEditorGraphWhileActive(const 
         }else ++it;}
         DocumentProps document{graph.documentName.c_str()};p->dc->updateDocumentProperties(&document);p->graph=graph;
         p->hiddenNativeTrackIDs.erase(std::remove_if(p->hiddenNativeTrackIDs.begin(),p->hiddenNativeTrackIDs.end(),[&](const auto& id){return !p->tracks.count(id);}),p->hiddenNativeTrackIDs.end());
-        p->endEditing();p->assign();p->notifyActualEdit();
+        p->endEditing();p->assign();p->notifyHostGraphInvalidation();
     }catch(...){p->failed=true;if(p->editing)p->endEditing();throw;}
     return receipt;
 }
@@ -528,7 +531,7 @@ void HostController::replaceEditorGraphWhileActive(const Graph& graph,const Reso
         const ResolveSource immutable=[providers=std::move(admitted.providers)](const SourceDescriptor& source){return providers.at(source.id);};
         if(archive)restoreArchiveOnlyImpl(*archive,graph,relocation,immutable,false);
         else{p->prepare(graph,immutable,false);p->beginEditing();p->createGraph();p->endEditing();p->assign();p->graphReady=true;}
-        p->notifyActualEdit();
+        p->notifyHostGraphInvalidation();
     }catch(...){p->failed=true;if(p->editing)p->endEditing();throw;}
 }
 void HostController::restoreArchiveOnly(const ArchiveSnapshot& state, const ResolveSource& resolve) {

@@ -101,8 +101,10 @@ PointerChange replaceCOWDataPointer(std::uintptr_t location,std::uintptr_t expec
 }
 struct AtomicCounters{
     std::atomic<std::uint64_t> calls{0},unrelated{0},stale{0},applied{0},frames{0},zero{0},rejected{0},bits{0};
+    std::atomic<std::uint64_t> held{0},heldFrames{0},holdRequests{0};
     FLStandaloneOverlayCounters snapshot(std::uint32_t readers=0)const noexcept{
-        return {calls.load(),unrelated.load(),stale.load(),applied.load(),frames.load(),zero.load(),rejected.load(),bits.load(),readers};
+        FLStandaloneOverlayCounters result{calls.load(),unrelated.load(),stale.load(),applied.load(),frames.load(),zero.load(),rejected.load(),bits.load(),readers};
+        result.heldCallbacks=held.load();result.heldFrames=heldFrames.load();result.staleHoldRequests=holdRequests.load();return result;
     }
 };
 struct HookPublication{
@@ -140,6 +142,8 @@ struct FLStandaloneSourceOverlay::Impl{
         std::string id;std::uintptr_t component=0;AtomicCounters counters;
         std::atomic<std::uint64_t> pendingBits{0},faultCaptureSerial{0};
         std::atomic<std::uint8_t> firstFault{0};
+        std::atomic<bool> holdDelivery{false};
+        std::atomic<std::uint64_t> holdEpisodeGeneration{0},activePublicationGeneration{0};
     };
     struct Source{
         std::string sourceID,modificationID;Digest pcmSHA{};
@@ -152,6 +156,7 @@ struct FLStandaloneSourceOverlay::Impl{
         std::shared_ptr<Control> control;std::shared_ptr<const FLNativeModelSnapshot> model;
         StandaloneSourceCacheBatch cache;std::int32_t mixer=-1;
         std::size_t preparedCacheBytes=0;
+        std::uint64_t publicationGeneration=0;
         std::vector<Source> sources;std::vector<Region> regions;
     };
     struct Table{
@@ -170,7 +175,7 @@ struct FLStandaloneSourceOverlay::Impl{
     explicit Impl(FLStandaloneOverlayConfig c):config(std::move(c)){
         demand(config.actualEngineImageBase&&config.exactEngineArm64SliceSHA256==kFLStandaloneOverlayEngineArm64SHA256&&
             !config.exactLoadedEnginePath.empty()&&config.confirmAlreadyAdmittedOwnedProcess&&
-            config.confirmStoppedDrainedNativeModelBoundary&&config.ownerFaultQueued,"standalone source router requires exact engine, admitted owner and fixed fault mailbox");
+            config.confirmStoppedDrainedNativeModelBoundary&&config.ownerFaultQueued&&config.ownerStaleHoldQueued,"standalone source router requires exact engine, admitted owner and fixed fault/stale-hold mailboxes");
         requireMain();demand(config.confirmAlreadyAdmittedOwnedProcess(config.ownerContext),"standalone source router owner was not admitted");
     }
     void requireMain()const{demand(std::this_thread::get_id()==modelThread,"standalone source router requires its owning model thread");}
@@ -277,7 +282,9 @@ struct FLStandaloneSourceOverlay::Impl{
                 demand(clipIDs.count(clip.nativeClipID20),"standalone source current insert has an uncaptured audio region");
         }
         next->preparedCacheBytes=cacheBytes;
-        return next;
+        const auto previousGeneration=next->control->activePublicationGeneration.load();
+        demand(previousGeneration<std::numeric_limits<std::uint64_t>::max(),"standalone source publication generation exhausted");
+        next->publicationGeneration=previousGeneration+1;return next;
     }
     std::unique_ptr<Table> makeTable(const std::map<std::string,std::shared_ptr<const Batch>>& instances){
         demand(instances.size()<=maximumInstances,"standalone source insert count exceeds fixed bound");auto next=std::make_unique<Table>();std::set<std::int32_t> mixers,clips;
@@ -321,6 +328,33 @@ struct FLStandaloneSourceOverlay::Impl{
             c.firstFault.compare_exchange_strong(zero,static_cast<std::uint8_t>(reason));}
         (void)t;config.ownerFaultQueued->store(true,std::memory_order_release);
     }
+    FLStandaloneOverlayOutcome holdForCoherentRebuild(const Batch& batch,const FLStandaloneSourceRead& read)noexcept{
+        // Called only AFTER the same complete physical/record/shape/range
+        // validation used for a cache replacement. No guessed source is muted.
+        auto& control=*batch.control;
+        totals.stale.fetch_add(1);control.counters.stale.fetch_add(1);
+        totals.held.fetch_add(1);control.counters.held.fetch_add(1);
+        if(read.originalReadFrames>0){
+            for(std::int32_t i=0;i<read.originalReadFrames;++i){read.nativeInterleavedStereo[i*2]=0;read.nativeInterleavedStereo[i*2+1]=0;}
+            const auto frames=static_cast<std::uint64_t>(read.originalReadFrames);
+            totals.heldFrames.fetch_add(frames);control.counters.heldFrames.fetch_add(frames);
+        }
+        // A retired in-flight reader may still hold its own stale span, but
+        // cannot re-arm STOP/status for a newer coherent current publication.
+        auto episode=control.holdEpisodeGeneration.load();
+        while(episode!=batch.publicationGeneration){
+            if(control.activePublicationGeneration.load()!=batch.publicationGeneration)break;
+            if(control.holdEpisodeGeneration.compare_exchange_weak(episode,batch.publicationGeneration)){
+                if(control.activePublicationGeneration.load()==batch.publicationGeneration){
+                    control.holdDelivery.store(true,std::memory_order_release);
+                    totals.holdRequests.fetch_add(1);control.counters.holdRequests.fetch_add(1);
+                    config.ownerStaleHoldQueued->store(true,std::memory_order_release);
+                }
+                break;
+            }
+        }
+        return FLStandaloneOverlayOutcome::HeldForRebuild;
+    }
     FLStandaloneOverlayOutcome process(const FLStandaloneSourceRead& r)noexcept{
         ReaderGuard guard(readers);const auto* t=table.load(std::memory_order_seq_cst);if(!t)return FLStandaloneOverlayOutcome::Inactive;
         totals.calls.fetch_add(1);
@@ -336,10 +370,8 @@ struct FLStandaloneSourceOverlay::Impl{
         add(entry?entry->batch:nullptr);add(physical?physical->batch:nullptr);add(indexed?indexed->batch:nullptr);
         if(!count){totals.unrelated.fetch_add(1);return FLStandaloneOverlayOutcome::Unrelated;}
         for(std::size_t i=0;i<count;++i)matches[i]->control->counters.calls.fetch_add(1);
-        // The real coordinator gate is checked on EACH actual read. Expected
-        // invalidation after an editor/source event is a stale bypass, no fault.
-        bool authorized=false;for(std::size_t i=0;i<count;++i){const auto* b=matches[i];authorized|=b->cache.gate->authorizes(b->cache.ticket);}
-        if(!authorized){totals.stale.fetch_add(1);for(std::size_t i=0;i<count;++i)matches[i]->control->counters.stale.fetch_add(1);return FLStandaloneOverlayOutcome::StaleTicket;}
+        // A stale cache cannot dry-forward a fully proven affected source.
+        // Identity/shape validation still precedes any silence hold or write.
         const auto deny=[&](FLStandaloneOverlayFault reason){fault(*t,matches,count,reason);return FLStandaloneOverlayOutcome::Rejected;};
         if(count!=1)return deny(FLStandaloneOverlayFault::AmbiguousTarget);
         const auto* b=matches[0];
@@ -366,16 +398,20 @@ struct FLStandaloneSourceOverlay::Impl{
         if(!std::isfinite(r.sourceStartFrame)||r.sourceStartFrame<0||std::floor(r.sourceStartFrame)!=r.sourceStartFrame)
             return deny(FLStandaloneOverlayFault::SourcePosition);
         if(!r.originalReadFrames){if(r.sourceStartFrame>double(s.frames)&&r.originalEnded!=1)return deny(FLStandaloneOverlayFault::SourcePosition);
-            if(!b->cache.gate->authorizes(b->cache.ticket)){totals.stale.fetch_add(1);b->control->counters.stale.fetch_add(1);return FLStandaloneOverlayOutcome::StaleTicket;}
+            if(!b->cache.gate->authorizes(b->cache.ticket)){
+                totals.zero.fetch_add(1);b->control->counters.zero.fetch_add(1);return holdForCoherentRebuild(*b,r);}
             totals.zero.fetch_add(1);b->control->counters.zero.fetch_add(1);return FLStandaloneOverlayOutcome::NativeZeroRead;}
         if(r.sourceStartFrame>double(s.frames))return deny(FLStandaloneOverlayFault::SourcePosition);
         const auto start=std::uint64_t(r.sourceStartFrame),frames=std::uint64_t(r.originalReadFrames);
         if(frames>std::uint64_t(s.frames)-start)return deny(FLStandaloneOverlayFault::SourceRange);
-        const auto* left=s.cache->channels[0].data()+start;const auto* right=s.cache->channels[s.channels==1?0:1].data()+start;
         // Recheck immediately before the first write. Once a notification has
-        // closed the gate, a later read cannot begin a stale source replacement.
-        if(!b->cache.gate->authorizes(b->cache.ticket)){totals.stale.fetch_add(1);b->control->counters.stale.fetch_add(1);return FLStandaloneOverlayOutcome::StaleTicket;}
+        // closed the gate, a later proven read holds instead of forwarding dry.
+        if(!b->cache.gate->authorizes(b->cache.ticket))return holdForCoherentRebuild(*b,r);
+        const auto* left=s.cache->channels[0].data()+start;const auto* right=s.cache->channels[s.channels==1?0:1].data()+start;
         for(std::uint64_t i=0;i<frames;++i){r.nativeInterleavedStereo[i*2]=left[i];r.nativeInterleavedStereo[i*2+1]=right[i];}
+        // If invalidation was observed during this copy, replace the proven
+        // span with a hold. Audio consumed before this check is not retractable.
+        if(!b->cache.gate->authorizes(b->cache.ticket))return holdForCoherentRebuild(*b,r);
         totals.applied.fetch_add(1);totals.frames.fetch_add(frames);b->control->counters.applied.fetch_add(1);b->control->counters.frames.fetch_add(frames);
         return FLStandaloneOverlayOutcome::Applied;
     }
@@ -413,6 +449,8 @@ void FLStandaloneSourceOverlay::publish(const std::string& id,const FLStandalone
     demand(p->retired.size()<64,"standalone source retired tables have not drained");p->retired.reserve(p->retired.size()+1);
     p->requireBoundary();demand(next->cache.gate->authorizes(next->cache.ticket),"standalone source ticket changed during immutable table preparation");
     if(previous!=p->live.end()&&previous->second->cache.gate!=next->cache.gate)previous->second->cache.gate->invalidate();
+    next->control->activePublicationGeneration=next->publicationGeneration;
+    next->control->holdEpisodeGeneration=0;next->control->holdDelivery=false;
     p->controls[id]=next->control;p->live=std::move(instances);p->replaceTable(std::move(table));
 }
 void FLStandaloneSourceOverlay::invalidateInstance(const std::string& id)noexcept{
@@ -444,7 +482,8 @@ std::vector<FLStandaloneOverlayInstanceStats> FLStandaloneSourceOverlay::instanc
     p->requireMain();std::vector<FLStandaloneOverlayInstanceStats> rows;rows.reserve(p->controls.size());
     for(const auto& pair:p->controls){FLStandaloneOverlayInstanceStats row;row.instanceID=pair.first;row.counters=pair.second->counters.snapshot();
         const auto found=p->live.find(pair.first);if(found!=p->live.end()){const auto& batch=*found->second;row.nativeMixerInsert=batch.mixer;row.captureSerial=batch.cache.captureSerial;
-            row.ticketEpoch=batch.cache.ticket.epoch;row.sources=batch.sources.size();row.regions=batch.regions.size();row.published=true;row.ticketAuthorized=batch.cache.gate->authorizes(batch.cache.ticket);}rows.push_back(std::move(row));}return rows;
+            row.ticketEpoch=batch.cache.ticket.epoch;row.sources=batch.sources.size();row.regions=batch.regions.size();row.published=true;row.ticketAuthorized=batch.cache.gate->authorizes(batch.cache.ticket);
+            row.staleHoldActive=batch.control->holdEpisodeGeneration.load()==batch.publicationGeneration;}rows.push_back(std::move(row));}return rows;
 }
 std::vector<FLStandaloneOverlayFaultRecord> FLStandaloneSourceOverlay::takeFaultsOnModelThread(){
     p->requireMain();std::vector<FLStandaloneOverlayFaultRecord> out;
@@ -454,6 +493,14 @@ std::vector<FLStandaloneOverlayFaultRecord> FLStandaloneSourceOverlay::takeFault
         // this drain can reset the first-code hint; retain a valid reason from
         // the exact drained bits rather than reporting None for a real fault.
         out.push_back({pair.first,c.component,c.faultCaptureSerial.load(),bits,static_cast<FLStandaloneOverlayFault>(code)});}return out;
+}
+std::vector<FLStandaloneOverlayStaleHoldRecord> FLStandaloneSourceOverlay::takeStaleHoldsOnModelThread(){
+    p->requireMain();std::vector<FLStandaloneOverlayStaleHoldRecord> out;
+    for(const auto& pair:p->controls){auto& c=*pair.second;if(!c.holdDelivery.exchange(false,std::memory_order_acq_rel))continue;
+        const auto current=p->live.find(pair.first);if(current==p->live.end())continue;const auto& batch=*current->second;
+        if(c.holdEpisodeGeneration.load()==batch.publicationGeneration&&!batch.cache.gate->authorizes(batch.cache.ticket))
+            out.push_back({pair.first,c.component,batch.cache.captureSerial,batch.cache.ticket.epoch});}
+    return out;
 }
 void FLStandaloneSourceOverlay::shutdownAtNativeBoundary(){
     p->requireBoundary();for(const auto& pair:p->live)pair.second->cache.gate->invalidate();
@@ -531,6 +578,10 @@ void operator delete[](void* value,std::size_t)noexcept{std::free(value);}
 
 namespace rysup::ara_lab {
 struct FLStandaloneSourceOverlayOfflineAccess{
+    static std::shared_ptr<const void> retainFirstBatch(FLStandaloneSourceOverlay& router){return router.p->current->batches.front();}
+    static FLStandaloneOverlayOutcome holdRetired(FLStandaloneSourceOverlay& router,const std::shared_ptr<const void>& retained,const FLStandaloneSourceRead& read)noexcept{
+        return router.p->holdForCoherentRebuild(*static_cast<const FLStandaloneSourceOverlay::Impl::Batch*>(retained.get()),read);
+    }
     static const void* borrow(FLStandaloneSourceOverlay& router)noexcept{
         router.p->readers.fetch_add(1,std::memory_order_seq_cst);
         return router.p->table.load(std::memory_order_seq_cst);
@@ -543,11 +594,11 @@ struct FLStandaloneSourceOverlayOfflineAccess{
 namespace {
 constexpr std::uintptr_t syntheticBase=0x100000000ULL;
 constexpr float marker=.625f;
-struct SyntheticOwner{std::atomic<bool> admitted{true},held{true},fault{false};std::atomic<unsigned> holdChecks{0};};
+struct SyntheticOwner{std::atomic<bool> admitted{true},held{true},fault{false},staleHold{false};std::atomic<unsigned> holdChecks{0};};
 bool syntheticAdmission(void* raw)noexcept{return static_cast<SyntheticOwner*>(raw)->admitted.load();}
 bool syntheticHold(void* raw)noexcept{auto& owner=*static_cast<SyntheticOwner*>(raw);owner.holdChecks.fetch_add(1);return owner.held.load();}
 FLStandaloneOverlayConfig syntheticConfig(SyntheticOwner& owner){return {syntheticBase,"/SYNTHETIC/no-native-image-loaded",
-    kFLStandaloneOverlayEngineArm64SHA256,syntheticAdmission,syntheticHold,&owner,&owner.fault};}
+    kFLStandaloneOverlayEngineArm64SHA256,syntheticAdmission,syntheticHold,&owner,&owner.fault,&owner.staleHold};}
 template<class T>void putSynthetic(Record& bytes,std::size_t offset,T value){std::memcpy(bytes.data()+offset,&value,sizeof(value));}
 void updateSynthetic(FLNativeClipSnapshot& clip){
     putSynthetic(clip.record,0,clip.timelineStartTicks00);putSynthetic(clip.record,4,clip.packedTypeAndChannel04);
@@ -669,12 +720,15 @@ void positiveControls(){
     f.output.fill(marker);r=f.read();r.nativeClipID=800;r.nativeChannelIndex=90;r.channelObject+=0x100000;putSynthetic(r.nativeRecord,32,r.nativeClipID);putSynthetic(r.nativeRecord,6,r.nativeChannelIndex);
     const auto untouched=f.output;demand(rtRead(f.router,r)==FLStandaloneOverlayOutcome::Unrelated&&f.output==untouched&&!f.owner.fault.load(),"unrelated same-sample clone was faulted or replaced");pass("unrelated native voice sharing a sample object is untouched and creates zero fault/rejection");
     auto ticket=f.monoGate->currentTicket();overlayOfflineRT=true;f.monoGate->invalidate();overlayOfflineRT=false;f.output.fill(marker);r=f.read();
-    demand(!f.monoGate->authorizes(ticket)&&rtRead(f.router,r)==FLStandaloneOverlayOutcome::StaleTicket&&f.output==untouched&&!f.owner.fault.load(),"ARA edit ticket did not immediately stop stale playback");
-    demand(rtRead(f.router,f.read(3))==FLStandaloneOverlayOutcome::Applied,"one stale insert disabled another mixer");pass("actual shared ARA gate checked on each read; editor invalidation bypasses stale batch without cross-insert failure");
+    demand(!f.monoGate->authorizes(ticket)&&rtRead(f.router,r)==FLStandaloneOverlayOutcome::HeldForRebuild&&!f.owner.fault.load(),"ARA edit ticket did not hold a proven stale source");
+    demand(std::all_of(f.output.begin()+1,f.output.begin()+7,[](float v){return v==0;})&&f.output[0]==marker&&f.output[13]==marker
+        &&std::all_of(f.output.begin()+7,f.output.begin()+13,[](float v){return v==marker;}),"stale hold changed guards/native padding or forwarded dry positive frames");
+    demand(f.owner.staleHold.exchange(false)&&f.router.takeStaleHoldsOnModelThread().size()==1,"stale source did not queue model-thread stop/rebuild-needed mailbox");
+    demand(rtRead(f.router,f.read(3))==FLStandaloneOverlayOutcome::Applied,"one stale insert disabled another mixer");pass("invalidated known source holds positive frames with silence and requests stopped rebuild; separate authorized mixer remains edited");
     auto replacement=syntheticBatch("mono",f.mono,f.monoGate,2,-1);f.router.publish("mono",f.mono,f.model,std::move(replacement));f.output.fill(marker);
     demand(rtRead(f.router,f.read())==FLStandaloneOverlayOutcome::Applied&&f.output[1]<0,"new authorized cache generation was not published");pass("new ticket/model-thread replacement publishes edited cache while retaining immutable old-batch lifetime");
     overlayOfflineRT=true;f.router.invalidateInstance("mono");overlayOfflineRT=false;f.output.fill(marker);
-    demand(rtRead(f.router,f.read())==FLStandaloneOverlayOutcome::StaleTicket&&f.output==untouched,"notification-thread invalidation did not close matching cache");
+    demand(rtRead(f.router,f.read())==FLStandaloneOverlayOutcome::HeldForRebuild&&std::all_of(f.output.begin()+1,f.output.begin()+7,[](float v){return v==0;}),"notification-thread invalidation did not hold matching source");
     f.router.removeInstanceAtNativeBoundary("mono");demand(rtRead(f.router,f.read())==FLStandaloneOverlayOutcome::Unrelated,"removed insert stayed targeted");pass("allocation-free explicit invalidation and model-thread removal leave native voices original-only");
 }
 void zeroControls(){OfflineFixture f;auto r=f.read();r.originalReadFrames=0;r.originalEnded=1;r.originalChanged=1;
@@ -683,6 +737,72 @@ void zeroControls(){OfflineFixture f;auto r=f.read();r.originalReadFrames=0;r.or
         demand(rtRead(f.router,r)==FLStandaloneOverlayOutcome::NativeZeroRead&&std::memcmp(old.data(),f.output.data(),sizeof(old))==0,"native zero-read tail changed or formed an invalid source offset");}
     const auto stats=f.router.counters();demand(stats.zeroReadCallbacks==4&&!stats.appliedFrames&&!stats.appliedCallbacks&&!stats.rejected,"native zero reads gained edited-frame credit");
     demand(r.originalReadFrames==0&&r.originalEnded==1&&r.originalChanged==1,"native zero-read flags changed");pass("EOF and ended past-EOF zero reads preserve full native output and flags with distinct zero counters and no source-pointer conversion");}
+void staleHoldControls(){
+    {
+        OfflineFixture f;const auto checks=f.owner.holdChecks.load();f.owner.held=false;f.monoGate->invalidate();
+        auto read=f.read();read.originalEnded=1;read.originalChanged=1;
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::HeldForRebuild,"playing stale source did not hold");
+        demand(std::all_of(f.output.begin()+1,f.output.begin()+7,[](float value){return value==0;})&&f.output[0]==marker&&f.output[13]==marker
+            &&std::all_of(f.output.begin()+7,f.output.begin()+13,[](float value){return value==marker;}),"stale hold forwarded dry samples or changed output outside actual returned span");
+        demand(read.originalReadFrames==3&&read.originalEnded==1&&read.originalChanged==1&&f.owner.holdChecks.load()==checks,
+            "stale hold changed native flags/count or called a native-model boundary on RT");
+        auto pending=f.router.takeStaleHoldsOnModelThread();demand(pending.size()==1&&pending[0].instanceID=="mono"&&pending[0].actualNativeComponent==f.mono.actualAssociation.actualComponent,
+            "stale hold mailbox lost exact actual component identity");
+        demand(f.owner.staleHold.exchange(false)&&f.router.takeStaleHoldsOnModelThread().empty(),"stale hold mailbox did not drain once");
+        f.output.fill(marker);demand(rtRead(f.router,f.read())==FLStandaloneOverlayOutcome::HeldForRebuild,"repeated stale read dry-forwarded");
+        demand(!f.owner.staleHold.load()&&f.router.takeStaleHoldsOnModelThread().empty(),"same stale publication repeatedly queued stop requests");
+        const auto stats=f.router.instanceStatsOnModelThread();demand(stats[0].staleHoldActive&&stats[0].counters.heldCallbacks==2&&stats[0].counters.heldFrames==6
+            &&stats[0].counters.staleHoldRequests==1&&!stats[0].counters.appliedFrames,"stale hold counters/status falsely credited cache playback");
+        f.owner.held=true;pass("proven stale positive spans hold with silence, preserve native tails/flags, coalesce one exact-owner stop request and expose counters without RT native calls");
+    }
+    {
+        OfflineFixture f;f.monoGate->invalidate();auto read=f.read();read.originalReadFrames=0;read.originalEnded=1;read.sourceStartFrame=std::ldexp(1.0,64);
+        const auto output=f.output;demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::HeldForRebuild&&f.output==output,
+            "stale zero-return hold touched native EOF/tail buffer");
+        const auto stats=f.router.counters();demand(stats.heldCallbacks==1&&!stats.heldFrames&&stats.zeroReadCallbacks==1&&f.owner.staleHold,
+            "stale zero-return hold gained source frames or failed queue");
+        pass("stale native zero reads queue rebuild-needed state without touching any native EOF/tail sample");
+    }
+    {
+        OfflineFixture f;f.monoGate->invalidate();auto read=f.read();read.nativeClipID=800;read.nativeChannelIndex=90;read.channelObject+=0x100000;
+        const auto output=f.output;demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Unrelated&&f.output==output&&!f.owner.staleHold&&!f.owner.fault,
+            "stale known publication silenced an unrelated source");
+        pass("unrelated and unknown sources remain byte-untouched even while another ARA publication is stale");
+    }
+    {
+        OfflineFixture f;f.monoGate->invalidate();auto read=f.read();read.readerPCM40+=8;const auto output=f.output;
+        demand(rtRead(f.router,read)==FLStandaloneOverlayOutcome::Rejected&&f.output==output&&f.owner.fault&&!f.owner.staleHold,
+            "stale hold bypassed actual reader/PCM identity seal");
+        pass("stale cache never authorizes silence for a target failing pointer/class/record proof; output remains untouched and fault is queued");
+    }
+    {
+        OfflineFixture f;f.monoGate->invalidate();rtRead(f.router,f.read());f.router.takeStaleHoldsOnModelThread();f.owner.staleHold=false;
+        f.router.publish("mono",f.mono,f.model,syntheticBatch("mono",f.mono,f.monoGate,2));f.output.fill(marker);
+        demand(rtRead(f.router,f.read())==FLStandaloneOverlayOutcome::Applied&&!f.router.instanceStatsOnModelThread()[0].staleHoldActive,
+            "coherent new publication did not clear a stale hold");
+        f.monoGate->invalidate();f.output.fill(marker);demand(rtRead(f.router,f.read())==FLStandaloneOverlayOutcome::HeldForRebuild&&f.owner.staleHold,
+            "new stale publication did not rearm one stop request");
+        const auto request=f.router.takeStaleHoldsOnModelThread();demand(request.size()==1&&request[0].captureSerial==2&&f.router.counters().staleHoldRequests==2,
+            "rearmed request used old publication authority");
+        pass("a coherently published edited generation clears hold and rearms at most one request for its own later invalidation");
+    }
+    {
+        SyntheticOwner owner;auto config=syntheticConfig(owner);config.ownerStaleHoldQueued=nullptr;bool refused=false;
+        try{FLStandaloneSourceOverlay missing(config);}catch(const std::exception&){refused=true;}
+        demand(refused,"stale hold was enabled without its stable owner queue");
+        pass("source router refuses admission without stable model-thread stale-hold mailbox");
+    }
+    {
+        OfflineFixture f;auto retained=FLStandaloneSourceOverlayOfflineAccess::retainFirstBatch(f.router);
+        f.router.publish("mono",f.mono,f.model,syntheticBatch("mono",f.mono,f.monoGate,2));
+        f.owner.staleHold=false;f.output.fill(marker);overlayOfflineRT=true;
+        const auto held=FLStandaloneSourceOverlayOfflineAccess::holdRetired(f.router,retained,f.read());overlayOfflineRT=false;
+        demand(held==FLStandaloneOverlayOutcome::HeldForRebuild&&!f.owner.staleHold&&f.router.takeStaleHoldsOnModelThread().empty()
+            &&!f.router.instanceStatsOnModelThread()[0].staleHoldActive,"retired reader re-queued STOP/status for a coherent newer publication");
+        f.output.fill(marker);demand(rtRead(f.router,f.read())==FLStandaloneOverlayOutcome::Applied,"retired hold changed the actual current ticket");
+        pass("retired in-flight batch may hold its own span but cannot re-arm STOP or stale status for a newer coherent publication");
+    }
+}
 void negativeControls(){using F=FLStandaloneOverlayFault;
     negativeRead("targeted event mutation closes matching gate and queues fixed owner fault",[](auto& r){r.nativeRecord[0]^=1;},F::RecordIdentity);
     negativeRead("targeted incomplete native observation fails closed",[](auto& r){r.nativeObservationComplete=false;},F::NativeRead);
@@ -756,7 +876,7 @@ void forwardingControl(){
 void concurrentLifecycleControl(){
     OfflineFixture f;std::atomic<bool> run{true},unexpected{false};std::atomic<unsigned> calls{0};std::array<float,12> output{};auto read=syntheticRead(*f.model,1,output.data());
     std::thread audio([&]{overlayOfflineRT=true;while(run.load()){const auto result=f.router.processObservedAfterOriginal(read);
-        if(result!=FLStandaloneOverlayOutcome::Applied&&result!=FLStandaloneOverlayOutcome::StaleTicket){unexpected=true;run=false;break;}calls.fetch_add(1);}overlayOfflineRT=false;});
+        if(result!=FLStandaloneOverlayOutcome::Applied&&result!=FLStandaloneOverlayOutcome::HeldForRebuild){unexpected=true;run=false;break;}calls.fetch_add(1);}overlayOfflineRT=false;});
     unsigned replacements=0;
     for(unsigned attempt=0;replacements<20&&attempt<10000;++attempt){
         auto cache=syntheticBatch("mono",f.mono,f.monoGate,2+attempt,(attempt&1)?-1.0f:1.0f);
@@ -811,7 +931,7 @@ void disabledTeardownControls(){
     }
 }
 int sourceOverlayOfflineMain(){
-    positiveControls();zeroControls();negativeControls();publicationControls();forwardingControl();concurrentLifecycleControl();disabledTeardownControls();
+    positiveControls();zeroControls();staleHoldControls();negativeControls();publicationControls();forwardingControl();concurrentLifecycleControl();disabledTeardownControls();
     std::cout<<"{\"schema\":\"rysup.standalone-fl.source-overlay-offline/1\",\"pass\":true,\"checks\":"<<passed.size()
         <<",\"synthetic_inputs\":true,\"native_engine_loaded\":false,\"native_hook_installed\":false,\"third_party_runtime_qualified\":false,\"rt_allocations\":"<<overlayOfflineRTAllocations.load()<<",\"controls\":[";
     for(std::size_t i=0;i<passed.size();++i){if(i)std::cout<<',';std::cout<<'"'<<passed[i]<<'"';}std::cout<<"]}\n";return 0;

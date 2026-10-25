@@ -65,10 +65,20 @@ struct InstanceRecord {
     std::atomic<Steinberg::Vst::IAudioProcessor*> actualProcessor{nullptr};
     std::atomic<Steinberg::Vst::IEditController*> actualController{nullptr};
     std::atomic<Steinberg::Vst::IComponentHandler*> actualNativeComponentHandler{nullptr};
+    // Actual argument while the original setter is executing. This is routing
+    // evidence for synchronous performEdit inside that call, NOT acceptance.
+    // After failure the accepted handler above remains unchanged. Nested native
+    // setters restore the outer pending argument; ordinary return clears it.
+    std::atomic<Steinberg::Vst::IComponentHandler*> actualPendingNativeComponentHandler{nullptr};
     std::atomic<Steinberg::FUnknown*> actualInitializeContext{nullptr};
     // The owner allocates/frees its payload on a non-RT native/model boundary.
     // Process callbacks read this pointer directly; no registry lookup or lock.
     std::atomic<void*> ownerData{nullptr};
+    // Separate opaque owner association for an actual controller. NEVER aliases
+    // or transfers component ownerData/lifetime merely because records connect.
+    // Owner publishes a verified controller association off RT; RT hooks/owner
+    // callbacks may read only stable preallocated metadata/atomic fields.
+    std::atomic<void*> ownerControllerData{nullptr};
     // Opaque owner policy only. Hooks never interpret/change these bits.
     std::atomic<std::uint32_t> ownerStateFlags{0};
     std::atomic<bool> stateInterceptionEnabled{false}; // opt-in only AFTER owner ARA admission
@@ -85,6 +95,7 @@ struct InstanceRecord {
     std::atomic<std::uint32_t> activationCalls{0},processingCalls{0},contextRequirementCalls{0},editorViewCalls{0};
 };
 enum class StateOperation { ComponentSetState, ComponentGetState, ControllerSetComponentState };
+enum class ControllerHandlerPhase : std::uint8_t { BeforeOriginal, AfterOriginal };
 enum class NativeProcessTelemetryPhase : std::uint8_t { BeforeOriginal, AfterOriginal };
 // Test-only POD observation. ALL pointers (including nested SDK buffers) are
 // borrowed for this synchronous callback only. No queued/deferred dereference.
@@ -174,12 +185,27 @@ struct Callbacks {
     // lookup, allocation or logging. Values/results are never changed here.
     // A shared handler's first controller is diagnostic only, may be nullptr or
     // terminated, and MUST NOT be used to infer which insert was edited. Owner
-    // invalidates every bound ARA insert gate instead of guessing that identity.
+    // scans only stable verified controller associations and matches the actual
+    // handler against each accepted OR pending handler. Unrelated controllers
+    // affect no ARA insert; a genuinely shared known handler affects only those
+    // associated matching inserts. This library never guesses that ownership.
     void (*paramEditObserved)(InstanceRecord* diagnosticFirstController,
         Steinberg::Vst::IComponentHandler* actualNativeHandler,
         Steinberg::Vst::ParamID,Steinberg::Vst::ParamValue,const ThreadInfo&,void*) noexcept=nullptr;
     void (*paramNormalizedObserved)(InstanceRecord&,Steinberg::Vst::IEditController*,
         Steinberg::Vst::ParamID,Steinberg::Vst::ParamValue,const ThreadInfo&,void*) noexcept=nullptr;
+    // Exact native setter boundary, including failure/null/different handlers.
+    // BeforeOriginal has pending actual argument already published and result
+    // kInternalError (unavailable); AfterOriginal reports its actual result,
+    // accepted handler changed only on success, pending restored/cleared. Owner
+    // may publish/rollback an independently verified association here. These
+    // callbacks can be non-main or inside processing: inspect actual ThreadInfo,
+    // use only pre-stored atomics there; no SDK/VM/registry/alloc/lookup on RT.
+    // Owned-companion TLS bypass suppresses callbacks and both handler stores.
+    void (*controllerHandlerObserved)(InstanceRecord&,ControllerHandlerPhase,
+        Steinberg::Vst::IEditController* actualController,
+        Steinberg::Vst::IComponentHandler* actualPassedHandler,
+        Steinberg::tresult,const ThreadInfo&,void*) noexcept=nullptr;
     // No borrowed self may be dereferenced after the final release. Records
     // retain identities/addresses for evidence, not native object ownership.
     void (*finalReleaseObserved)(InstanceRecord&,const ThreadInfo&,void*) noexcept=nullptr;

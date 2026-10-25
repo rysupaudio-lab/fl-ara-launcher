@@ -197,7 +197,7 @@ struct TeardownBoundary {
 };
 lab::FLNativeModelOptions modelOptions(std::int32_t actualMixerInsert){
     lab::FLNativeModelOptions options;options.captureAllAudioChannels=true;options.copyQualifiedPCMOnlyForMixerInsert=actualMixerInsert;options.copyQualifiedPCM=true;
-    options.requireQualifiedPCMForEveryAudioSource=false;options.requireSupportedMixerInsertForEveryAudioChannel=false;
+    options.requireQualifiedPCMForEveryAudioSource=false;options.requireSupportedMixerInsertForEveryAudioChannel=true;
     // Exact mappings qualified in the sealed FL 26.1.7 native RAM experiment.
     // No other encoding/reference combination may become source audio.
     options.pcmQualifications={

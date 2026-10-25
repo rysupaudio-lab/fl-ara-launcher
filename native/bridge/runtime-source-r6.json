@@ -1,0 +1,25 @@
+{
+  "schema": "rysup.fl-ara-runtime-source-delta/1",
+  "candidate": "r6-routing-only",
+  "prior_runtime_source_manifest": "runtime-source-r5.json",
+  "upstream_source_freeze_sha256": "b8f88080acb5424f55a79078013bb37af2c033ab187f1acc3b374e2173979092",
+  "compile_manifest_sha256": "93ea888f3a41cdbf0dfc9c5da9abf9d297e8f411c6526758f1382cdd7cf37de6",
+  "compiled_artifact_verification_sha256": "d3c3596f3f6f082a6cd3c27ea10cf9248d30dd761f79e3f26f3a506b1f7439d3",
+  "compiled_helper_original_sha256": "ba11076944dfff647cdde1f715ac917898be535c44ae7e38191000a53dbd3e97",
+  "routing_only": true,
+  "no_device_start_fix": true,
+  "no_audio_io_qualification": true,
+  "intended_runtime_scope": "graph-model-native-save-offline-export-testing-only",
+  "runtime_qualified": false,
+  "sdk_source_imported": false,
+  "vendor_binary_or_audio_imported": false,
+  "private_qa_static_review_imported": false,
+  "files": [
+    {
+      "path": "native/bridge/native/FLAppBridge.mm",
+      "previous_sha256": "9ec59636e4eddc710c4332e15e79170f3ead59b8425abb03502b227d12d1a5e8",
+      "sha256": "86be58850a10a4429432bbb7f39ba6c0ee30054c03da76b6086ca33d9c8de539",
+      "bytes": 99077
+    }
+  ]
+}

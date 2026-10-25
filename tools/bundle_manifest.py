@@ -14,6 +14,17 @@ def sanitized_manifest(raw, helper, root):
             'runtime_admission_scope':raw.get('runtime_admission_scope','owned-qualification-candidate')}
     if result['runtime_admission_scope'] not in {'bare-startup-test-only','owned-qualification-candidate','qualified-runtime'}:raise ValueError('Unrecognized runtime admission scope')
     for name in FLAGS:result[name]=raw.get(name) is True
+    if 'routing_only' in raw and not isinstance(raw['routing_only'],bool):raise ValueError('Expected boolean routing-only scope')
+    if raw.get('routing_only') is True:
+        restrictions={'routing_only':True,'device_start_fix':False,'no_device_start_fix':True,
+                      'audio_io_qualification':False,'no_audio_io_qualification':True,
+                      'retains_immutable_r5_device_start_guards':True}
+        scope='graph-model-native-save-offline-export-testing-only'
+        if any(raw.get(k) is not v for k,v in restrictions.items()) or raw.get('intended_runtime_scope')!=scope:
+            raise ValueError('Routing-only restrictions must be explicit and consistent')
+        if result['runtime_admission_scope']!='owned-qualification-candidate' or any(result[k] for k in FLAGS):
+            raise ValueError('Routing-only candidate cannot claim runtime qualification')
+        result.update(restrictions);result['intended_runtime_scope']=scope
     revision=raw.get('source_revision')
     if revision is None:
         revision=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()

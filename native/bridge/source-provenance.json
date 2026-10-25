@@ -1,6 +1,6 @@
 {
   "schema": "rysup.fl-ara-source-consolidation/1",
-  "upstream_source_freeze_sha256": "3f81b326cc9456dd4a0fd0ed4cca970a543a2d6a948e4be161ad28d345a04e3c",
+  "upstream_source_freeze_sha256": "820bd60e8162ad4cc33a230956a6246d7c4617c00331a3730d810666e9e4fe37",
   "sdk_source_included": false,
   "vendor_binary_or_audio_included": false,
   "files": [
@@ -34,45 +34,52 @@
     },
     {
       "destination": "host/GenericARAHost.cpp",
-      "sha256": "a0895e8d59e42995d9332b5a206b1e352f4c5c73d2b667cd720314ce24ef8efa",
-      "output_sha256": "a0895e8d59e42995d9332b5a206b1e352f4c5c73d2b667cd720314ce24ef8efa",
+      "sha256": "97fa5a8ff86eaf136d03a4e2867b55250e1103231ea5e2c207305959991ad6c8",
+      "output_sha256": "97fa5a8ff86eaf136d03a4e2867b55250e1103231ea5e2c207305959991ad6c8",
       "transform": null,
-      "bytes": 58428
+      "bytes": 58669
     },
     {
       "destination": "host/GenericARAHost.h",
-      "sha256": "917113b0f88205f2c60b0079f45ac7bb4cc62aafe4e3ba522644e4f86c6ca47e",
-      "output_sha256": "917113b0f88205f2c60b0079f45ac7bb4cc62aafe4e3ba522644e4f86c6ca47e",
+      "sha256": "ccdf1183d5a373298a115f1c72741f73cbe826494d5976fd9ec5de4f9af83501",
+      "output_sha256": "ccdf1183d5a373298a115f1c72741f73cbe826494d5976fd9ec5de4f9af83501",
       "transform": null,
-      "bytes": 14601
+      "bytes": 15214
     },
     {
       "destination": "host/OwnedVST3PlaybackCompanion.cpp",
-      "sha256": "8bbd7b952f61c10ce12b52cd0f32a91cbeeab83d43ded37fe1710948762a9ea5",
-      "output_sha256": "8bbd7b952f61c10ce12b52cd0f32a91cbeeab83d43ded37fe1710948762a9ea5",
+      "sha256": "64f79225ba8dc12b51caa5b206da726c790b6604a2cef760d67ded0fea0ae7e5",
+      "output_sha256": "64f79225ba8dc12b51caa5b206da726c790b6604a2cef760d67ded0fea0ae7e5",
       "transform": null,
-      "bytes": 16965
+      "bytes": 22232
     },
     {
       "destination": "host/OwnedVST3PlaybackCompanion.h",
-      "sha256": "31c7e476740d622d021cfbdd0f944f82d917052abaa43b8e719a04904570d155",
-      "output_sha256": "31c7e476740d622d021cfbdd0f944f82d917052abaa43b8e719a04904570d155",
+      "sha256": "1c8a00e9341c4f0d7b8423a64db99fd16da4870b5917f114c84ca5a6cde53b70",
+      "output_sha256": "1c8a00e9341c4f0d7b8423a64db99fd16da4870b5917f114c84ca5a6cde53b70",
       "transform": null,
-      "bytes": 2074
+      "bytes": 2157
     },
     {
       "destination": "host/StandaloneARACoordinator.cpp",
-      "sha256": "addb3eb0f294c6641379f87c57bb5d0d0299afda02970051146e5debc75283b1",
-      "output_sha256": "addb3eb0f294c6641379f87c57bb5d0d0299afda02970051146e5debc75283b1",
+      "sha256": "eb952f22832e0d638a027983c7f0bf545813f25574f99f37caffa58ea192334e",
+      "output_sha256": "eb952f22832e0d638a027983c7f0bf545813f25574f99f37caffa58ea192334e",
       "transform": null,
-      "bytes": 34892
+      "bytes": 41110
     },
     {
       "destination": "host/StandaloneARACoordinator.h",
-      "sha256": "81a706099edb165315885c0a4039c624643f0a568322d2f3d416d90556ad8a3a",
-      "output_sha256": "81a706099edb165315885c0a4039c624643f0a568322d2f3d416d90556ad8a3a",
+      "sha256": "124e35303c135f8964acd535c699c2425c449f8b9bde9220716db7932b5e0aba",
+      "output_sha256": "124e35303c135f8964acd535c699c2425c449f8b9bde9220716db7932b5e0aba",
       "transform": null,
-      "bytes": 13903
+      "bytes": 22258
+    },
+    {
+      "destination": "host/StandaloneARAEditRelay.h",
+      "sha256": "18d29a953371c328930b3b1c12747ae9505c57bbac2628d6a499c86fd30b6e6c",
+      "output_sha256": "18d29a953371c328930b3b1c12747ae9505c57bbac2628d6a499c86fd30b6e6c",
+      "transform": null,
+      "bytes": 949
     },
     {
       "destination": "host/StandaloneCacheGate.h",
@@ -80,6 +87,13 @@
       "output_sha256": "c0521403b4ef1a00e455ec681d8773039640d9300a2af0d98d5c248ec3a76f25",
       "transform": null,
       "bytes": 1701
+    },
+    {
+      "destination": "host/StandaloneCacheInvalidation.h",
+      "sha256": "0e4225b3d51bcc33e071d9ca4b09267c0aba6885bb74b5ddb0472c11430462a6",
+      "output_sha256": "0e4225b3d51bcc33e071d9ca4b09267c0aba6885bb74b5ddb0472c11430462a6",
+      "transform": null,
+      "bytes": 1314
     },
     {
       "destination": "host/VST3ARAEntry.cpp",
@@ -103,32 +117,74 @@
       "bytes": 3934
     },
     {
+      "destination": "host/check_prepared_save_metadata.cpp",
+      "sha256": "b5a03610a44a5ae459424a8501f2600e84d05be9470140285d2e058001520ed4",
+      "output_sha256": "b5a03610a44a5ae459424a8501f2600e84d05be9470140285d2e058001520ed4",
+      "transform": null,
+      "bytes": 6445
+    },
+    {
       "destination": "host/check_standalone_host_contracts.py",
-      "sha256": "b4d9755b2652d99f610c7be8c4998d05d37fc9c8445477fa0b298d1a404fd7f4",
-      "output_sha256": "ea3b0570a08250c87140bf4fc7488a71389b91bc5e8e87eedb341e88cfcea861",
+      "sha256": "22105dfe504b84ebfb10d0731ae973f8bfaf7256de7a5025d8d6ab94bfdd2970",
+      "output_sha256": "4809ecb748185dbf55a3c3575ed509d17dd82b593b9e892e62f1785af56c2ba2",
       "transform": "repo-contract-env",
-      "bytes": 14110
+      "bytes": 17332
     },
     {
       "destination": "native/FLAppBridge.mm",
-      "sha256": "18e1206d265f15500b50de9f242787a3f06200a25b537c5f79ec04e1d0379fcb",
-      "output_sha256": "18e1206d265f15500b50de9f242787a3f06200a25b537c5f79ec04e1d0379fcb",
+      "sha256": "e807c51e8b55dfdb571a3d4e08d08370bfb88832a2e0ec6690ae8be6fec77d80",
+      "output_sha256": "e807c51e8b55dfdb571a3d4e08d08370bfb88832a2e0ec6690ae8be6fec77d80",
       "transform": null,
-      "bytes": 62359
+      "bytes": 138132
+    },
+    {
+      "destination": "native/FLAppBridgeSaveGuardIntegrationTests.mm",
+      "sha256": "c9f3781ef139eb79132bee8fa7fd8bcdaecd9448863e2f3e974fdde204ace28f",
+      "output_sha256": "c9f3781ef139eb79132bee8fa7fd8bcdaecd9448863e2f3e974fdde204ace28f",
+      "transform": null,
+      "bytes": 44873
+    },
+    {
+      "destination": "native/FLHeadlessNativeExport.h",
+      "sha256": "736dd33919cc263b2904f08be8b504cf609ea2c9dd5ff0c2e90eb7ddd827ba2a",
+      "output_sha256": "736dd33919cc263b2904f08be8b504cf609ea2c9dd5ff0c2e90eb7ddd827ba2a",
+      "transform": null,
+      "bytes": 538
+    },
+    {
+      "destination": "native/FLHeadlessNativeExport.mm",
+      "sha256": "da8c50ebca1ef798129974bdd6c9a56b65caf2d45ce1a70dda0e0938a5e4f92a",
+      "output_sha256": "da8c50ebca1ef798129974bdd6c9a56b65caf2d45ce1a70dda0e0938a5e4f92a",
+      "transform": null,
+      "bytes": 11940
     },
     {
       "destination": "native/FLNativeApplication.h",
-      "sha256": "e0a769c31122041f427eaa86dc87eacefcf843f44b94028bdad389588afca871",
-      "output_sha256": "e0a769c31122041f427eaa86dc87eacefcf843f44b94028bdad389588afca871",
+      "sha256": "277b164aa0df97c3531e9293482e0c90860c65e3c9be0a21429294557dedadcd",
+      "output_sha256": "277b164aa0df97c3531e9293482e0c90860c65e3c9be0a21429294557dedadcd",
       "transform": null,
-      "bytes": 2254
+      "bytes": 6194
     },
     {
       "destination": "native/FLNativeApplication.mm",
-      "sha256": "3fc66e63a16c5675c709493ca33d8eaab26a9970ab273e29391264e56d4ccfd2",
-      "output_sha256": "3fc66e63a16c5675c709493ca33d8eaab26a9970ab273e29391264e56d4ccfd2",
+      "sha256": "5e18ce85124bb2651ba4932ec9e2188160831b5a2665e4529187c11d675257cc",
+      "output_sha256": "5e18ce85124bb2651ba4932ec9e2188160831b5a2665e4529187c11d675257cc",
       "transform": null,
-      "bytes": 18365
+      "bytes": 48451
+    },
+    {
+      "destination": "native/FLNativeEditorSetupCachePolicy.h",
+      "sha256": "a9a06cb3336b90b8a3f944d34ac10d0f9471750043fbd773b28b12fbb776e337",
+      "output_sha256": "a9a06cb3336b90b8a3f944d34ac10d0f9471750043fbd773b28b12fbb776e337",
+      "transform": null,
+      "bytes": 2979
+    },
+    {
+      "destination": "native/FLNativeEditorSetupCachePolicyTests.cpp",
+      "sha256": "23fcf68cb01536341ddea81674c01a71b3064fe7f50f4db1c4239711c0571127",
+      "output_sha256": "23fcf68cb01536341ddea81674c01a71b3064fe7f50f4db1c4239711c0571127",
+      "transform": null,
+      "bytes": 10952
     },
     {
       "destination": "native/FLNativeMixBoundary.cpp",
@@ -152,6 +208,27 @@
       "bytes": 1885
     },
     {
+      "destination": "native/FLNativeProcessAdmission.h",
+      "sha256": "67db2de6477822b59286c98eb3cefa87e963c032ca2ab534d2e41b5d72b43fa5",
+      "output_sha256": "67db2de6477822b59286c98eb3cefa87e963c032ca2ab534d2e41b5d72b43fa5",
+      "transform": null,
+      "bytes": 4685
+    },
+    {
+      "destination": "native/FLNativeProcessAdmissionHooksTests.cpp",
+      "sha256": "93a4a402a136c04f1316a6bfb10f2229f10303056b27dbd06d2acaf807a3b758",
+      "output_sha256": "93a4a402a136c04f1316a6bfb10f2229f10303056b27dbd06d2acaf807a3b758",
+      "transform": null,
+      "bytes": 18930
+    },
+    {
+      "destination": "native/FLNativeProcessAdmissionTests.cpp",
+      "sha256": "c102e9fabb1c5bd7f0cef9c06efe46d3472972b0be3ec634d6edb728db75e1d1",
+      "output_sha256": "c102e9fabb1c5bd7f0cef9c06efe46d3472972b0be3ec634d6edb728db75e1d1",
+      "transform": null,
+      "bytes": 6903
+    },
+    {
       "destination": "native/FLNativeProcessObserver.cpp",
       "sha256": "d7cc0a837fd0c6d02d263749e0f5e303a1f370593ee17571d033e516b0a9947d",
       "output_sha256": "d7cc0a837fd0c6d02d263749e0f5e303a1f370593ee17571d033e516b0a9947d",
@@ -173,6 +250,83 @@
       "bytes": 8084
     },
     {
+      "destination": "native/FLNativeSaveGuard.h",
+      "sha256": "e5a1ff52c33fab26329f693d9464e686f1e3e530a283da33cc0b9d8de49eb127",
+      "output_sha256": "e5a1ff52c33fab26329f693d9464e686f1e3e530a283da33cc0b9d8de49eb127",
+      "transform": null,
+      "bytes": 5144
+    },
+    {
+      "destination": "native/FLNativeSaveGuard.mm",
+      "sha256": "bce2982b49dc725aaaf845e00c0e6a0656bf3628ce084db0de19f983050c451f",
+      "output_sha256": "bce2982b49dc725aaaf845e00c0e6a0656bf3628ce084db0de19f983050c451f",
+      "transform": null,
+      "bytes": 27991
+    },
+    {
+      "destination": "native/FLNativeSaveGuardLivenessTests.mm",
+      "sha256": "88d2460b481c26d3aadd1b9055254c6d62da7cc9787a48ecc792e9ccc80be804",
+      "output_sha256": "88d2460b481c26d3aadd1b9055254c6d62da7cc9787a48ecc792e9ccc80be804",
+      "transform": null,
+      "bytes": 15697
+    },
+    {
+      "destination": "native/FLNativeSaveGuardPinTests.mm",
+      "sha256": "10b633d079291df2f6e0c69b901d4c547642a347c820a72c76f478efefa898b9",
+      "output_sha256": "10b633d079291df2f6e0c69b901d4c547642a347c820a72c76f478efefa898b9",
+      "transform": null,
+      "bytes": 2263
+    },
+    {
+      "destination": "native/FLNativeSaveGuardTests.mm",
+      "sha256": "d7437e6e89faf95ab76480c5fcda5f18809c234b45c0857a7f72f0d5229a98dd",
+      "output_sha256": "d7437e6e89faf95ab76480c5fcda5f18809c234b45c0857a7f72f0d5229a98dd",
+      "transform": null,
+      "bytes": 18863
+    },
+    {
+      "destination": "native/FLNativeSaveGuardUnicodeTests.mm",
+      "sha256": "0cc2b7715e3fdd00a014281f12fe349d6a3cc0eedc9a3b296222ec9ac1a7d42d",
+      "output_sha256": "0cc2b7715e3fdd00a014281f12fe349d6a3cc0eedc9a3b296222ec9ac1a7d42d",
+      "transform": null,
+      "bytes": 4049
+    },
+    {
+      "destination": "native/FLNativeSlotPowerControl.h",
+      "sha256": "23d69ffd202aac5b403ad0e067e95ecc5e23abf8de6e159d88e7fa0871350109",
+      "output_sha256": "23d69ffd202aac5b403ad0e067e95ecc5e23abf8de6e159d88e7fa0871350109",
+      "transform": null,
+      "bytes": 10017
+    },
+    {
+      "destination": "native/FLNativeSlotPowerControlTests.cpp",
+      "sha256": "107888a5cdedafe4df2188c41615edb04a2796ed57f9ffb878aba138b6b99968",
+      "output_sha256": "107888a5cdedafe4df2188c41615edb04a2796ed57f9ffb878aba138b6b99968",
+      "transform": null,
+      "bytes": 15581
+    },
+    {
+      "destination": "native/FLNativeSlotPowerObserver.cpp",
+      "sha256": "03707a5e76ae959d7937c58f3937adac22d52e1d20dd6f1c2a591c91cf341434",
+      "output_sha256": "03707a5e76ae959d7937c58f3937adac22d52e1d20dd6f1c2a591c91cf341434",
+      "transform": null,
+      "bytes": 15811
+    },
+    {
+      "destination": "native/FLNativeSlotPowerObserver.h",
+      "sha256": "55968193111645bc239056d7953d66ff0544e65dd1a31f0e99b5d1b0f39d78f3",
+      "output_sha256": "55968193111645bc239056d7953d66ff0544e65dd1a31f0e99b5d1b0f39d78f3",
+      "transform": null,
+      "bytes": 1990
+    },
+    {
+      "destination": "native/FLNativeSlotPowerObserverTests.cpp",
+      "sha256": "4b60fc1b69fd52884218c43d7952a008367f946b377087d812a6329785ea48f2",
+      "output_sha256": "4b60fc1b69fd52884218c43d7952a008367f946b377087d812a6329785ea48f2",
+      "transform": null,
+      "bytes": 12967
+    },
+    {
       "destination": "native/FLNativeTransport.cpp",
       "sha256": "312c549987294b1051767f20268ba83db9c13cd1cb9f9fe9dbe8dac38aefbdf1",
       "output_sha256": "312c549987294b1051767f20268ba83db9c13cd1cb9f9fe9dbe8dac38aefbdf1",
@@ -187,53 +341,130 @@
       "bytes": 2005
     },
     {
-      "destination": "native/FLStandaloneSourceOverlay.cpp",
-      "sha256": "c8c8cb8e178a8415a8303800c092bd52b7557137379731f826e9965a1f286aa9",
-      "output_sha256": "c8c8cb8e178a8415a8303800c092bd52b7557137379731f826e9965a1f286aa9",
+      "destination": "native/FLPointerProvenance.h",
+      "sha256": "d28b677c12fb098abf7bb3eee925b77717d733bc436bf724ae1167ff984e7965",
+      "output_sha256": "d28b677c12fb098abf7bb3eee925b77717d733bc436bf724ae1167ff984e7965",
       "transform": null,
-      "bytes": 83266
+      "bytes": 571
+    },
+    {
+      "destination": "native/FLPointerProvenanceTests.cpp",
+      "sha256": "78418fc976b05ec92d5b57af5f0f5a218933f6b130f55fa1ba3097d080d2949d",
+      "output_sha256": "78418fc976b05ec92d5b57af5f0f5a218933f6b130f55fa1ba3097d080d2949d",
+      "transform": null,
+      "bytes": 1151
+    },
+    {
+      "destination": "native/FLPreparedDeviceIntegrationTests.cpp",
+      "sha256": "245ad1e1867929fcc2549fca1221851229a06f2093e83d9d6050a1a994391cfc",
+      "output_sha256": "245ad1e1867929fcc2549fca1221851229a06f2093e83d9d6050a1a994391cfc",
+      "transform": null,
+      "bytes": 12554
+    },
+    {
+      "destination": "native/FLStandaloneSourceOverlay.cpp",
+      "sha256": "b3708cc46f308a2d142c5cc578a20ab582cce638c67b76120db51619eeebe7e6",
+      "output_sha256": "b3708cc46f308a2d142c5cc578a20ab582cce638c67b76120db51619eeebe7e6",
+      "transform": null,
+      "bytes": 155414
     },
     {
       "destination": "native/FLStandaloneSourceOverlay.h",
-      "sha256": "fddd7a16728fa063fd690e98915c62179f3c59f30d3d9b5e56a737b40f200e5e",
-      "output_sha256": "fddd7a16728fa063fd690e98915c62179f3c59f30d3d9b5e56a737b40f200e5e",
+      "sha256": "3fe9d33e80ff062fe8dfcdfb82ba5906d3e8c413a5fb8926ae7b0fbe6dad923e",
+      "output_sha256": "3fe9d33e80ff062fe8dfcdfb82ba5906d3e8c413a5fb8926ae7b0fbe6dad923e",
       "transform": null,
-      "bytes": 7599
+      "bytes": 15118
+    },
+    {
+      "destination": "native/FLTestOutputSink.cpp",
+      "sha256": "fb394805fa40ea0d1282d57c691d5a4b38ada8376059dad226ba95a36144525b",
+      "output_sha256": "fb394805fa40ea0d1282d57c691d5a4b38ada8376059dad226ba95a36144525b",
+      "transform": null,
+      "bytes": 33154
+    },
+    {
+      "destination": "native/FLTestOutputSink.h",
+      "sha256": "6f7cb2c76b497286afedaf9075d186afa63e754d90402a1428fb55ee7229b605",
+      "output_sha256": "6f7cb2c76b497286afedaf9075d186afa63e754d90402a1428fb55ee7229b605",
+      "transform": null,
+      "bytes": 10628
+    },
+    {
+      "destination": "native/FLTestOutputSinkAUHALProbe.cpp",
+      "sha256": "c77613343639a64405e979cb7ef3b3a978e87219d10ffe08488f52fc8e3c193e",
+      "output_sha256": "c77613343639a64405e979cb7ef3b3a978e87219d10ffe08488f52fc8e3c193e",
+      "transform": null,
+      "bytes": 9320
+    },
+    {
+      "destination": "native/FLTestOutputSinkTests.cpp",
+      "sha256": "ed9b7b0faec195faf70d492b70a4802c71e5401f87d59fb4809dd00a002d6f26",
+      "output_sha256": "ed9b7b0faec195faf70d492b70a4802c71e5401f87d59fb4809dd00a002d6f26",
+      "transform": null,
+      "bytes": 34873
+    },
+    {
+      "destination": "native/FLUnitDeviceGate.cpp",
+      "sha256": "f6e6f981bd510baff69b637131e6033a8980fd491a15457725c06a42e654bb37",
+      "output_sha256": "f6e6f981bd510baff69b637131e6033a8980fd491a15457725c06a42e654bb37",
+      "transform": null,
+      "bytes": 16922
+    },
+    {
+      "destination": "native/FLUnitDeviceGate.h",
+      "sha256": "2f09dad55029507c35e7f3113bc1f3291dcdacd91e0630ae77bffc348034173f",
+      "output_sha256": "2f09dad55029507c35e7f3113bc1f3291dcdacd91e0630ae77bffc348034173f",
+      "transform": null,
+      "bytes": 7890
+    },
+    {
+      "destination": "native/FLUnitDeviceGateTests.cpp",
+      "sha256": "6d90c018d208376a19441048ea1be8fffa3e11082dce89b9151dfd1727598c6a",
+      "output_sha256": "6d90c018d208376a19441048ea1be8fffa3e11082dce89b9151dfd1727598c6a",
+      "transform": null,
+      "bytes": 12988
     },
     {
       "destination": "native/FLVST3NativeHooks.cpp",
-      "sha256": "b092fcfabc88848541fb7eb5e165f9935fd8662e10d0b404c393ca0938acde82",
-      "output_sha256": "b092fcfabc88848541fb7eb5e165f9935fd8662e10d0b404c393ca0938acde82",
+      "sha256": "7fdbbf7b619442ad2723451c8ba632c35febf76c16a3bb664f4ab5f0d8bf648f",
+      "output_sha256": "7fdbbf7b619442ad2723451c8ba632c35febf76c16a3bb664f4ab5f0d8bf648f",
       "transform": null,
-      "bytes": 52226
+      "bytes": 53211
     },
     {
       "destination": "native/FLVST3NativeHooks.h",
-      "sha256": "b6feb757033c2d4ee2f92f2f1a3698bb76540c5359a49ea8d189025b096d8bd9",
-      "output_sha256": "b6feb757033c2d4ee2f92f2f1a3698bb76540c5359a49ea8d189025b096d8bd9",
+      "sha256": "f06d86caed54833771099fb13bc5e87d99e9772b34789c82ed7254bfc67e9e49",
+      "output_sha256": "f06d86caed54833771099fb13bc5e87d99e9772b34789c82ed7254bfc67e9e49",
       "transform": null,
-      "bytes": 14088
+      "bytes": 15865
     },
     {
       "destination": "native/RegistrationReadThrough.h",
-      "sha256": "a11c9ed22d4a31e0cabd1947f37786163ac9adf73702c294410e52660ad9421a",
-      "output_sha256": "a11c9ed22d4a31e0cabd1947f37786163ac9adf73702c294410e52660ad9421a",
+      "sha256": "21a83ebccd24c29084b896d21d2c0589c89259fe8b638430d566b5829e28f613",
+      "output_sha256": "21a83ebccd24c29084b896d21d2c0589c89259fe8b638430d566b5829e28f613",
       "transform": null,
-      "bytes": 955
+      "bytes": 2487
     },
     {
       "destination": "native/RegistrationReadThrough.mm",
-      "sha256": "08096b2dc4071d92fbba0d18f11ae16fca72e789b16314d3ecba3bad067ddbfa",
-      "output_sha256": "08096b2dc4071d92fbba0d18f11ae16fca72e789b16314d3ecba3bad067ddbfa",
+      "sha256": "ef1e0b328ddfba50d320464b20e2ba5b5ea2601ea622ee8062b948c0e2b7e486",
+      "output_sha256": "ef1e0b328ddfba50d320464b20e2ba5b5ea2601ea622ee8062b948c0e2b7e486",
       "transform": null,
-      "bytes": 20658
+      "bytes": 25240
     },
     {
       "destination": "native/build_helper.py",
-      "sha256": "da6afff81caa2702f2dc72d92adb77cf2679664360806bc9190816698fed6610",
-      "output_sha256": "da6afff81caa2702f2dc72d92adb77cf2679664360806bc9190816698fed6610",
+      "sha256": "0473006687dc618a928db56de40d31faeb8e416fe85716f990e6e700ebddf11d",
+      "output_sha256": "0473006687dc618a928db56de40d31faeb8e416fe85716f990e6e700ebddf11d",
       "transform": null,
-      "bytes": 7437
+      "bytes": 7743
+    },
+    {
+      "destination": "native/check_save_glue.py",
+      "sha256": "e629aaa25bcb77da07f091e5f95d611ec9dd916d3611bdb1e1ed833041fc0398",
+      "output_sha256": "e629aaa25bcb77da07f091e5f95d611ec9dd916d3611bdb1e1ed833041fc0398",
+      "transform": null,
+      "bytes": 3411
     },
     {
       "destination": "legacy/FLNativeModel.h",

@@ -7,6 +7,8 @@
 #include "FLNativeMixBoundary.h"
 #include "FLNativeEditorSetupCachePolicy.h"
 #include "FLNativeSlotPowerObserver.h"
+#include "FLHeadlessNativeExport.h"
+#include <pluginterfaces/vst/ivstparameterchanges.h>
 #include "FLNativeSaveGuard.h"
 #include "RegistrationReadThrough.h"
 #include "../host/FLStandaloneGraphDecoder.h"
@@ -50,6 +52,11 @@ struct NativeSetupDiagnostic {
     bool mainThread=false,insideNativeProcess=false,dirtyBefore=false,dirtyAfter=false,qualifiedBefore=false,qualifiedAfter=false;
 };
 static_assert(sizeof(Steinberg::Vst::ProcessSetup)==24,"diagnostic must retain exact ProcessSetup POD layout");
+struct NativeParameterEchoSnapshot {
+    lab::OrdinaryParameterSnapshot parameters;lab::StandaloneCacheTicket ticket;
+    ObservedNativeInstance* controllerNode=nullptr;Steinberg::Vst::IEditController* controller=nullptr;
+    std::uintptr_t actualComponent=0;
+};
 struct BridgeRecord {
     hooks::InstanceRecord* native=nullptr;
     std::atomic<ObservedNativeInstance*> currentControllerNode{nullptr};
@@ -68,6 +75,11 @@ struct BridgeRecord {
     std::shared_ptr<const lab::FLNativeModelSnapshot> copied;
     std::shared_ptr<lab::StandaloneCacheGate> nativeCacheGate;
     std::unique_ptr<process_observer::NativeProcessObserver> nativeProcessObserver;
+    // Storage changes only while this exact component admission is closed and
+    // fully drained; every RT snapshot reader is inside that admission lease.
+    std::unique_ptr<const NativeParameterEchoSnapshot> parameterEchoStorage;
+    std::atomic<const NativeParameterEchoSnapshot*> parameterEchoSnapshot{nullptr};
+    std::atomic<std::uint64_t> nativeInputQueueExactEchoes{0};
     std::atomic<slot_power::Binding*> nativeSlotPower{nullptr};
     std::uint32_t nativeSlotPowerRegistryIndex=std::numeric_limits<std::uint32_t>::max();
     bool nativeSlotPowerRegistered=false,nativeSlotPowerSeedAttempted=false,nativeSlotPowerKnownOnce=false,nativeSlotPowerSourcePublished=false;
@@ -329,6 +341,7 @@ lab::StandaloneNativeTeardownBoundary Adapter::verifyActualNativeTeardownBoundar
 }
 lab::StandaloneSnapshotData captureActualNativeSnapshotData(BridgeRecord& target,const lab::StandaloneInstanceIdentity& identity,bool metadataOnly){
     auto* r=&target;const auto admission=r->native->nativeProcessAdmission.snapshot();
+    demand(!headlessNativeExportInFlight(),"native render owns the model boundary");
     demand(pthread_main_np()&&nativeApplicationAdmitted()&&stopped()&&r->alive&&!r->teardown
         &&!admission.allowed&&admission.activeCount==0,
         "actual native metadata capture requires stopped/drained owned component");
@@ -541,6 +554,40 @@ void instanceCreated(hooks::InstanceRecord& n,const hooks::ThreadInfo& info,void
     }else{runtime().nativeInstanceTrackingIncomplete=true;}
     n.stateInterceptionEnabled=true;markActiveNativeSaveFailedFromAnyThread();
 }
+bool echoControllerCurrent(const BridgeRecord& r,const NativeParameterEchoSnapshot& proof)noexcept{
+    auto* node=r.currentControllerNode.load(std::memory_order_acquire);
+    return node&&node==proof.controllerNode&&node->native&&node->controllerOwner.load()==&r
+        &&node->verifiedController.load()==proof.controller&&node->native->actualController.load()==proof.controller
+        &&node->native->nativeAlive&&!node->native->nativeTerminated;
+}
+std::unique_ptr<const NativeParameterEchoSnapshot> captureCacheParameterEchoProof(BridgeRecord& r,const lab::StandaloneSourceCacheBatch& cache){
+    const auto admission=r.native->nativeProcessAdmission.snapshot();
+    demand(pthread_main_np()&&r.boundary&&!admission.allowed&&admission.activeCount==0,"parameter cache proof requires actual stopped/drained boundary");
+    if(cache.modifications.empty())return {};
+    auto proof=std::make_unique<NativeParameterEchoSnapshot>();proof->parameters=cache.modifications.front().restoredOrdinaryParameters;
+    auto& values=proof->parameters;
+    if(!values.valid||!values.count||values.count>values.capacity)return {};
+    proof->ticket=cache.ticket;proof->actualComponent=r.identity.actualComponent;proof->controllerNode=r.currentControllerNode.load();
+    if(!proof->controllerNode)return {};proof->controller=proof->controllerNode->verifiedController.load();
+    if(!proof->controller||!echoControllerCurrent(r,*proof))return {};
+    for(const auto& modification:cache.modifications){const auto& other=modification.restoredOrdinaryParameters;
+        if(!other.valid||other.count!=values.count||other.ownedComponent==r.identity.actualComponent
+            ||other.ownedController==reinterpret_cast<std::uintptr_t>(proof->controller))return {};
+        for(std::uint32_t i=0;i<values.count;++i)if(values.rows[i].id!=other.rows[i].id||values.rows[i].normalized!=other.rows[i].normalized||values.rows[i].flags!=other.rows[i].flags)return {};
+    }
+    // The restored owned-child values must ALSO equal the current verified
+    // native controller. This proves component/cache/UI correspondence rather
+    // than suppressing a queued value based on the UI alone.
+    try{
+        if(proof->controller->getParameterCount()!=static_cast<int>(values.count))return {};
+        for(std::uint32_t i=0;i<values.count;++i){Steinberg::Vst::ParameterInfo info{};
+            if(proof->controller->getParameterInfo(i,info)!=kResultOk||info.id!=values.rows[i].id||info.flags!=values.rows[i].flags
+                ||proof->controller->getParamNormalized(info.id)!=values.rows[i].normalized)return {};
+        }
+        if(proof->controller->getParameterCount()!=static_cast<int>(values.count)||!echoControllerCurrent(r,*proof)||!cache.gate->authorizes(cache.ticket))return {};
+    }catch(...){return {};}
+    return proof;
+}
 void refreshAtBoundary(BridgeRecord& r,bool build){
     auto& rt=runtime();publishAllControllerAssociationsOnMain();auto snapshot=rt.coordinator->captureActualCurrentSnapshot(r.identity.instanceID);
     auto* power=r.nativeSlotPower.load();demand(nativeSlotPowerObserverReady()&&power&&r.nativeSlotPowerRegistered&&!power->closed(),"native slot-power binding is unavailable at model boundary");
@@ -600,7 +647,10 @@ void refreshAtBoundary(BridgeRecord& r,bool build){
             "this third-party ARA source cache reports latency/head/tail; overlay profile refuses unsupported timing");
         demand(r.decoded.has_value()&&r.copied,"source overlay requires exact current decoded model");
         if(!r.nativeSlotPowerSourcePublished&&power->snapshotForBlock()==slot_power::Power::Unknown){r.dirty=true;throw lab::NativeModelBoundaryUnavailable("initial native slot power is unknown; source publication deferred");}
+        auto parameterProof=captureCacheParameterEchoProof(r,cache);
         rt.overlay->publish(r.identity.instanceID,*r.decoded,r.copied,std::move(cache));r.nativeSlotPowerSourcePublished=true;
+        r.parameterEchoSnapshot.store(nullptr,std::memory_order_release);r.parameterEchoStorage=std::move(parameterProof);
+        r.parameterEchoSnapshot.store(r.parameterEchoStorage.get(),std::memory_order_release);
         r.preparedNativeSave=rt.coordinator->prepareEditorArchiveForNativeSave(r.identity.instanceID,snapshot);
         r.error.clear();r.initialPrimePending=false;r.initialWaitNoticeShown=false;
         writeNativeApplicationEvent("actual_native_ara_source_cache_published",r.identity.instanceID);
@@ -624,6 +674,7 @@ lab::StandaloneSnapshotData captureMetadataForNativeSave(BridgeRecord& r){
 }
 bool nativeSavePreflight(const NativeSaveRequest& request,void** cookie,void*)noexcept{
     if(cookie)*cookie=nullptr;auto& rt=runtime();++rt.nativeSavePreflights;
+    if(headlessNativeExportInFlight())return false;
     try{
         demand(cookie&&pthread_main_np()&&nativeApplicationAdmitted()&&nativeSaveGuardReady(),"native save protection is unavailable");
         demand(!rt.nativeSaveFreeze&&stopped()&&!request.directedTarget&&request.actualSaveType==0,"native ARA save requires stopped full-project temporary-file route");
@@ -755,6 +806,7 @@ BridgeRecord* exactNativeControllerOwner(hooks::InstanceRecord& n,const hooks::T
 }
 Steinberg::tresult state(hooks::InstanceRecord& n,hooks::StateOperation operation,Steinberg::IBStream* stream,hooks::OriginalStateCall& original,const hooks::ThreadInfo& info,void*)noexcept{
     if(!stream){markActiveNativeSaveFailedFromAnyThread();return kResultFalse;}
+    if(headlessNativeExportInFlight())return kResultFalse;
     auto* r=record(n);
     // Off-main has no authority to inspect the native Save stack. Its exact
     // hook record can still fail a live transaction through the RT-safe latch.
@@ -917,7 +969,7 @@ void setup(hooks::InstanceRecord& n,const Steinberg::Vst::ProcessSetup& setup,St
         info.isMainThread&&!info.insideNativeProcess,r->sampleRate,r->setupQualified,r->dirty,r->nativeCacheGate.get(),
         [&]()noexcept{return currentNativeCacheGenerationCoherent(*r);});
     if(decision.action==editor_setup_cache::Action::PreserveCoherentSourceCache)return;
-    if(!r->setupQualified||!info.isMainThread||!stopped()||currentNativeSaveTransaction())return;
+    if(!r->setupQualified||!info.isMainThread||!stopped()||currentNativeSaveTransaction()||headlessNativeExportInFlight())return;
     // The actual original setupProcessing has returned. Prime synchronously
     // before FL can start original processing, ONLY after the owned worker proves
     // that main holds no outer recursive native mix lock.
@@ -959,14 +1011,34 @@ void invalidateAssociatedARACache(BridgeRecord& r)noexcept{
 void nativeProcessTelemetry(hooks::InstanceRecord& n,const hooks::NativeProcessTelemetry& observation,const hooks::ThreadInfo& info,void*)noexcept{
     if(auto* r=record(n))if(r->nativeProcessObserver)r->nativeProcessObserver->observe(n,observation,info);
 }
-void inputParameterChanges(hooks::InstanceRecord& n,Steinberg::Vst::IParameterChanges*,Steinberg::int32 count,const hooks::ThreadInfo&,void*)noexcept{
-    if(count>0)if(auto* r=record(n)){r->nativeInputQueueParameterNotifications.fetch_add(1);invalidateAssociatedARACache(*r);}
+bool exactCurrentCacheParameterEcho(const BridgeRecord& r,Steinberg::Vst::IParameterChanges* changes,Steinberg::int32 count,Steinberg::int32 sampleCount)noexcept{
+    const auto* proof=r.parameterEchoSnapshot.load(std::memory_order_acquire);
+    if(!proof||!changes||count<=0||count>static_cast<int>(lab::OrdinaryParameterSnapshot::capacity)||sampleCount<0
+        ||!r.alive||r.dirty||!r.nativeCacheGate||r.identity.actualComponent!=proof->actualComponent
+        ||reinterpret_cast<std::uintptr_t>(r.native->actualComponent.load())!=proof->actualComponent
+        ||!echoControllerCurrent(r,*proof)||!r.nativeCacheGate->authorizes(proof->ticket))return false;
+    std::array<Steinberg::Vst::ParamID,lab::OrdinaryParameterSnapshot::capacity> seen{};
+    try{for(int i=0;i<count;++i){auto* queue=changes->getParameterData(i);if(!queue||queue->getPointCount()!=1)return false;
+        const auto id=queue->getParameterId();for(int j=0;j<i;++j)if(seen[j]==id)return false;seen[i]=id;
+        Steinberg::int32 offset=-1;Steinberg::Vst::ParamValue value=0;
+        if(queue->getPoint(0,offset,value)!=kResultOk||offset!=0||!std::isfinite(value)||value<0||value>1)return false;
+        bool match=false;for(std::uint32_t j=0;j<proof->parameters.count;++j){const auto& row=proof->parameters.rows[j];
+            constexpr auto special=Steinberg::Vst::ParameterInfo::kIsReadOnly|Steinberg::Vst::ParameterInfo::kIsProgramChange|Steinberg::Vst::ParameterInfo::kIsBypass;
+            if(row.id==id&&!(row.flags&special)&&row.normalized==value){match=true;break;}}
+        if(!match)return false;
+    }}catch(...){return false;}
+    return changes->getParameterCount()==count&&!r.dirty&&echoControllerCurrent(r,*proof)&&r.nativeCacheGate->authorizes(proof->ticket);
+}
+void inputParameterChanges(hooks::InstanceRecord& n,Steinberg::Vst::IParameterChanges* changes,Steinberg::int32 count,Steinberg::int32 samples,const hooks::ThreadInfo&,void*)noexcept{
+    if(count!=0)if(auto* r=record(n)){r->nativeInputQueueParameterNotifications.fetch_add(1);
+        if(exactCurrentCacheParameterEcho(*r,changes,count,samples)){r->nativeInputQueueExactEchoes.fetch_add(1);return;}
+        invalidateAssociatedARACache(*r);}
 }
 void controllerHandlerObserved(hooks::InstanceRecord& n,hooks::ControllerHandlerPhase,Steinberg::Vst::IEditController*,
     Steinberg::Vst::IComponentHandler*,Steinberg::tresult,const hooks::ThreadInfo& info,void*)noexcept{
     // BeforeOriginal: exact pending handler is already atomic-published by hooks.
     // Main publishes ownership before native setter can synchronously performEdit.
-    if(info.isMainThread&&!info.insideNativeProcess)publishControllerAssociationOnMain(n);
+    if(info.isMainThread&&!info.insideNativeProcess&&!headlessNativeExportInFlight())publishControllerAssociationOnMain(n);
 }
 void parameterEdit(hooks::InstanceRecord*,Steinberg::Vst::IComponentHandler* actualHandler,Steinberg::Vst::ParamID,Steinberg::Vst::ParamValue,const hooks::ThreadInfo&,void*)noexcept{
     if(!actualHandler)return;
@@ -979,7 +1051,7 @@ void parameterEdit(hooks::InstanceRecord*,Steinberg::Vst::IComponentHandler* act
     }
 }
 void parameterNormalized(hooks::InstanceRecord& n,Steinberg::Vst::IEditController* actualController,Steinberg::Vst::ParamID,Steinberg::Vst::ParamValue,const hooks::ThreadInfo& info,void*)noexcept{
-    if(info.isMainThread&&!info.insideNativeProcess)publishControllerAssociationOnMain(n);
+    if(info.isMainThread&&!info.insideNativeProcess&&!headlessNativeExportInFlight())publishControllerAssociationOnMain(n);
     if(auto* r=publishedControllerOwner(n,actualController)){r->nativeNormalizedParameterNotifications.fetch_add(1);invalidateAssociatedARACache(*r);}
 }
 void fault(const char*,const hooks::ModuleRecord*,const hooks::InstanceRecord* n,const hooks::ThreadInfo&,void*)noexcept{
@@ -1025,6 +1097,7 @@ bool status(){
         d[@"scoped_normalized_parameter_notifications"]=@(r->nativeNormalizedParameterNotifications.load());
         d[@"scoped_handler_parameter_notifications"]=@(r->nativeHandlerParameterNotifications.load());
         d[@"scoped_input_queue_parameter_notifications"]=@(r->nativeInputQueueParameterNotifications.load());
+        d[@"scoped_input_queue_exact_current_cache_echoes"]=@(r->nativeInputQueueExactEchoes.load());d[@"current_cache_parameter_echo_proof_available"]=@(r->parameterEchoSnapshot.load()!=nullptr);
         d[@"initial_wait_notice_shown"]=@(r->initialWaitNoticeShown);
         d[@"native_stop_for_cache_rebuild_pending"]=@(r->nativeStopForRebuildPending.load());d[@"native_stop_requested_epoch"]=@(r->nativeStopRequestedEpoch.load());d[@"actual_native_stops_verified"]=@(r->actualNativeStopsVerified);
         d[@"instance_id"]=@(r->identity.instanceID.c_str());d[@"native_insert"]=@(r->insert.mixerInsert);d[@"bound"]=@YES;
@@ -1228,6 +1301,7 @@ void drainNativeSlotPowerStop(BridgeRecord& r){
 }
 void tick(const NativeApplication& app,void*)noexcept{
     if(!pthread_main_np()||!nativeApplicationAdmitted())return;
+    if(headlessNativeExportInFlight())return; // Native export may pump a nested run loop.
     pollNativeSaveGuardTransactions();
     // A vendor may pump a nested run loop while its native Save frame owns a
     // foreign lock. Never enter any model/cache/ARA SDK operation there.
@@ -1356,6 +1430,10 @@ void tick(const NativeApplication& app,void*)noexcept{
             alert.informativeText=@(rt.nativeSaveError.c_str());[alert addButtonWithTitle:@"Keep session open"];
             status();if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];}
         if(++rt.ticks%10==0)status();
+        bool renderReady=!rt.records.empty()&&!rt.nativeSaveFreeze&&stopped();
+        for(const auto& owned:rt.records)if(!currentNativeCacheGenerationCoherent(*owned))renderReady=false;
+        pollHeadlessNativeExport(renderReady);
+
     }catch(const std::exception& e){rt.error=e.what();writeNativeApplicationEvent("ara_app_bridge_tick_refused",e.what());status();}
     catch(...){rt.error="Unknown native SDK exception in app bridge";writeNativeApplicationEvent("ara_app_bridge_tick_refused",rt.error);}
 }

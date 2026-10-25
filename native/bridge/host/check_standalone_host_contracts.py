@@ -83,6 +83,27 @@ void check(const bool& actualStillFresh){StandaloneFreshNativeInitialization pro
     VST3ARAEntry::NativeLifecycle native;
     native.verifyBorrowedNativeFreshnessImmediatelyBeforeBind=proof.verifyActualBorrowedNativeFreshnessImmediatelyBeforeBinding;}
 '''),
+        ('positive-genuine-prepared-native-save-api',True,prefix+'''
+void check(StandaloneARACoordinator& c,const std::string& id,const CapturedStandaloneSnapshot& stopped,
+           const StandaloneSnapshotData& actualFileOpenRAM){
+    auto prepared=c.prepareEditorArchiveForNativeSave(id,stopped);
+    auto frozen=c.validatePreparedEditorArchiveForNativeSave(id,prepared,actualFileOpenRAM);
+    auto copy=prepared;(void)copy;(void)frozen;(void)prepared.identity().currentCacheTicket;
+}
+'''),
+        ('reject-authored-prepared-native-archive',False,prefix+'void check(){PreparedEditorArchive fake;}\n'),
+        ('reject-mutating-prepared-native-authority',False,prefix+'void check(const PreparedEditorArchive& actual){actual.identity().currentCacheTicket.epoch++;}\n'),
+        ('reject-unvalidated-prepared-archive-access',False,prefix+'void check(const PreparedEditorArchive& actual){auto bytes=actual.archive();(void)bytes;}\n'),
+        ('positive-queue-only-actual-ara-native-dirty-callback',True,prefix+'''
+void check(StandaloneOwnerAdapter& owner,const std::string& id,std::uint64_t actualARARevision){
+    owner.queueActualNativeDocumentDirtyFromARA(id,actualARARevision);
+}
+'''),
+        ('positive-queue-only-native-stop-for-cache-rebuild',True,prefix+'''
+void check(StandaloneOwnerAdapter& owner,const std::string& id,std::uint64_t actualInvalidatedEpoch){
+    owner.queueActualNativeStopForCacheRebuild(id,actualInvalidatedEpoch);
+}
+'''),
         ('positive-component-only-teardown-authority-default-closed',True,prefix+'''
 constexpr StandaloneNativeTeardownBoundary closed{};
 static_assert(!closed.authorizesKnownComponent(123),"old adapters must not authorize teardown");
@@ -124,7 +145,8 @@ void check(){try{throw NativeMixBoundaryDeferred("actual native worker mix EBUSY
     result=subprocess.run(command,env=env,capture_output=True,text=True)
     receipts.append({'name':'strict-current-source-compile','pass':result.returncode==0,'command':command,'stderr':result.stderr})
     gate=OUT/'pure-cache-gate.cpp'
-    gate.write_text(prefix+'''#include <cassert>
+    gate.write_text(prefix+'''#include "StandaloneARAEditRelay.h"
+#include <cassert>
 #include <thread>
 #include <iostream>
 int main(){
@@ -172,6 +194,16 @@ int main(){
     require(plan.noSourceOverlayRequired&&plan.renderModificationIDs.empty()&&retained.modifications.size()==2);
     retained.regions={{"bad","missing-edit","track","",0,1,0,1,ARA::kARAPlaybackTransformationNoChanges}};
     bool bad=false;try{planStandaloneSourceCaches(retained);}catch(const std::invalid_argument&){bad=true;}require(bad);
+    StandaloneARAEditRelay relay;std::atomic<unsigned> queued{0},background{0};std::atomic<std::uint64_t> pending{0};
+    const auto mainThread=std::this_thread::get_id();
+    const auto queue=[&](std::uint64_t actual)noexcept{queued.fetch_add(1);pending.store(actual);
+        if(std::this_thread::get_id()!=mainThread)background.fetch_add(1);};
+    require(!relay.forwardActualRevision(0,queue)&&queued.load()==0);
+    require(relay.forwardActualRevision(7,queue)&&queued.load()==1&&pending.load()==7);
+    require(!relay.forwardActualRevision(7,queue)&&!relay.forwardActualRevision(6,queue)&&queued.load()==1);
+    std::thread notify([&]{relay.forwardActualRevision(8,queue);relay.forwardActualRevision(0,queue);relay.forwardActualRevision(8,queue);});notify.join();
+    require(queued.load()==2&&background.load()==1&&pending.load()==8);
+    require(relay.lastForwardedActualRevision()==8);
     std::cout<<"{\\\"pass\\\":true,\\\"checks\\\":"<<checks<<",\\\"nativePluginLoaded\\\":false}\\n";
 }
 ''')
@@ -182,7 +214,7 @@ int main(){
     if result.returncode==0:
         result=subprocess.run([str(binary)],env=env,capture_output=True,text=True)
         gate_result=json.loads(result.stdout) if result.returncode==0 else {}
-        receipts.append({'name':'pure-gate-runtime-no-plugin','pass':result.returncode==0 and gate_result.get('checks')==31,
+        receipts.append({'name':'pure-gate-runtime-no-plugin','pass':result.returncode==0 and gate_result.get('checks')==36,
                          'result':gate_result,'stdout':result.stdout,'stderr':result.stderr})
     fresh_binary=OUT/'last-bind-freshness'
     command=['clang++',*flags,'-O1',str(SOURCE/'check_last_bind_freshness.cpp'),str(SOURCE/'VST3ARAEntry.cpp'),'-o',str(fresh_binary)]
@@ -193,7 +225,16 @@ int main(){
         observed=json.loads(result.stdout) if result.returncode==0 else {}
         receipts.append({'name':'offline-last-bind-freshness-runtime','pass':result.returncode==0 and observed.get('checks')==5,
                          'result':observed,'stdout':result.stdout,'stderr':result.stderr})
-    sources=[*cpp,*[SOURCE/name for name in ('StandaloneARACoordinator.h','StandaloneCacheGate.h','GenericARAHost.h','VST3ARAEntry.h','OwnedVST3PlaybackCompanion.h')]]
+    save_binary=OUT/'prepared-save-metadata'
+    command=['clang++',*flags,'-O1',str(SOURCE/'check_prepared_save_metadata.cpp'),'-o',str(save_binary)]
+    result=subprocess.run(command,env=env,capture_output=True,text=True)
+    receipts.append({'name':'pure-prepared-save-metadata-build','pass':result.returncode==0,'command':command,'stderr':result.stderr})
+    if result.returncode==0:
+        result=subprocess.run([str(save_binary)],env=env,capture_output=True,text=True)
+        observed=json.loads(result.stdout) if result.returncode==0 else {}
+        receipts.append({'name':'pure-prepared-save-metadata-runtime','pass':result.returncode==0 and observed.get('checks')==46 and observed.get('resolverCalls')==0,
+                         'result':observed,'stdout':result.stdout,'stderr':result.stderr})
+    sources=[*cpp,*[SOURCE/name for name in ('StandaloneARACoordinator.h','StandaloneCacheGate.h','StandaloneARAEditRelay.h','GenericARAHost.h','VST3ARAEntry.h','OwnedVST3PlaybackCompanion.h')]]
     receipt={'schema':'rysup.standalone-ara-owner-neutral-contracts/1','pass':all(r['pass'] for r in receipts),
              'checks':receipts,'sourceSeals':[{'path':str(p),'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sources],
              'nativePluginLoaded':False,'normalFLQualified':False,'hardwareUsed':False}

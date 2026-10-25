@@ -1,6 +1,9 @@
 #include "OwnedVST3PlaybackCompanion.h"
 #include "VST3ARAEntry.h"
 #include <pluginterfaces/vst/ivstcomponent.h>
+#include <pluginterfaces/vst/ivsteditcontroller.h>
+#include <pluginterfaces/vst/ivstmessage.h>
+#include <cmath>
 #include <pluginterfaces/vst/ivstaudioprocessor.h>
 #include <pluginterfaces/vst/ivstprocesscontext.h>
 #include <pluginterfaces/vst/vstspeaker.h>
@@ -63,6 +66,7 @@ struct OwnedVST3PlaybackCompanion::Impl {
     std::uintptr_t componentIdentity=0;
     bool initialized=false,bound=false,fresh=true,active=false,processing=false,uncertain=false,disposed=false;
     bool activationEver=false,ordinaryStateRestored=false;
+    OrdinaryParameterSnapshot ordinaryParameters;
     bool inputBusEnabled=false,outputBusEnabled=false;
     int inputBusCount=0;
     int channels=0,maximumBlock=0,processMode=Steinberg::Vst::kOffline;
@@ -139,7 +143,76 @@ void OwnedVST3PlaybackCompanion::restoreState(const Bytes& actualOriginalOrdinar
     const auto result=p->component->setState(stream);stream->release();
     demand(result==Steinberg::kResultOk,"actual original-only ordinary state was refused by owned playback component");
     p->ordinaryStateRestored=true;
+    // Independent edit controller receives the SAME component bytes the owned
+    // renderer just accepted. This is not a native-UI-value assumption. Missing
+    // or unsupported readback disables only echo suppression, never rendering.
+    Steinberg::Vst::IEditController* controller=nullptr;bool initialized=false,separate=false;
+    Steinberg::Vst::IConnectionPoint *componentConnection=nullptr,*controllerConnection=nullptr;
+    bool componentConnectAttempted=false,controllerConnectAttempted=false;
+    try{
+        // A combined own component/controller is already initialized through
+        // IComponent. Never initialize/terminate its shared IPluginBase twice.
+        if(p->component->queryInterface(INLINE_UID_OF(Steinberg::Vst::IEditController),reinterpret_cast<void**>(&controller))==Steinberg::kResultOk&&controller)initialized=true;
+        else{
+            Steinberg::TUID cid{};
+            if(p->component->getControllerClassId(cid)==Steinberg::kResultOk
+                &&p->retainedFactory->createInstance(cid,INLINE_UID_OF(Steinberg::Vst::IEditController),reinterpret_cast<void**>(&controller))==Steinberg::kResultOk&&controller){
+                separate=true;initialized=controller->initialize(nullptr)==Steinberg::kResultOk;
+            }
+        }
+        if(controller&&initialized){
+            bool connected=true;
+            if(separate){
+                p->component->queryInterface(INLINE_UID_OF(Steinberg::Vst::IConnectionPoint),reinterpret_cast<void**>(&componentConnection));
+                controller->queryInterface(INLINE_UID_OF(Steinberg::Vst::IConnectionPoint),reinterpret_cast<void**>(&controllerConnection));
+                // Standard VST3 bidirectional ownership handshake. JUCE builds
+                // its controller's parameter list from this actual own child.
+                if(componentConnection||controllerConnection){
+                    connected=componentConnection&&controllerConnection;
+                    if(connected){componentConnectAttempted=true;connected=componentConnection->connect(controllerConnection)==Steinberg::kResultOk;}
+                    if(connected){controllerConnectAttempted=true;connected=controllerConnection->connect(componentConnection)==Steinberg::kResultOk;}
+                }
+            }
+            if(connected){
+                auto* state=new OriginalOrdinaryStateStream(actualOriginalOrdinaryState);
+                Steinberg::tresult accepted=Steinberg::kResultFalse;
+                try{accepted=controller->setComponentState(state);}catch(...){state->release();throw;}state->release();
+                const auto count=controller->getParameterCount();OrdinaryParameterSnapshot values;
+                values.ownedComponent=p->componentIdentity;values.ownedController=address(controller);
+                if(accepted==Steinberg::kResultOk&&count>0&&count<=static_cast<int>(values.capacity)){
+                    bool valid=true;values.count=static_cast<std::uint32_t>(count);
+                    for(int i=0;i<count&&valid;++i){Steinberg::Vst::ParameterInfo info{};
+                        if(controller->getParameterInfo(i,info)!=Steinberg::kResultOk){valid=false;break;}
+                        const double value=controller->getParamNormalized(info.id);
+                        valid=std::isfinite(value)&&value>=0&&value<=1;
+                        for(int j=0;j<i;++j)if(values.rows[j].id==info.id)valid=false;
+                        values.rows[i]={info.id,value,info.flags};
+                    }
+                    if(valid&&controller->getParameterCount()==count){values.valid=true;p->ordinaryParameters=values;}
+                }
+            }
+        }
+    }catch(...){p->ordinaryParameters={};}
+    // Disconnect in reverse order before destroying either separate endpoint.
+    // Even a failed connect may have retained its peer, so an attempted call
+    // gets a matching disconnect. Uncertain endpoints remain process-lifetime.
+    bool disconnected=true;
+    if(controllerConnectAttempted)try{if(controllerConnection->disconnect(componentConnection)!=Steinberg::kResultOk)disconnected=false;}catch(...){disconnected=false;}
+    if(componentConnectAttempted)try{if(componentConnection->disconnect(controllerConnection)!=Steinberg::kResultOk)disconnected=false;}catch(...){disconnected=false;}
+    if(!disconnected){p->ordinaryParameters={};p->uncertain=true;
+        throw std::runtime_error("owned parameter controller connection could not be safely disconnected");}
+    if(controller){
+        bool terminated=false;
+        try{terminated=!separate||!initialized||controller->terminate()==Steinberg::kResultOk;}catch(...){}
+        if(!terminated){p->ordinaryParameters={};p->uncertain=true;
+            throw std::runtime_error("owned parameter controller termination is uncertain");}
+        if(controllerConnection)controllerConnection->release();
+        if(componentConnection)componentConnection->release();
+        controller->release();
+    }
 }
+OrdinaryParameterSnapshot OwnedVST3PlaybackCompanion::restoredOrdinaryParameters()const noexcept{return p->ordinaryParameters;}
+
 std::uintptr_t OwnedVST3PlaybackCompanion::ownedComponentAddress()const noexcept{return p->componentIdentity;}
 void OwnedVST3PlaybackCompanion::startOwnedPlayback(double sampleRate,int channels,int block,bool offline) {
     OwnedCall scope;p->checkThread();demand(p->bound && !p->disposed && inactive() && sampleRate==48000.0 && (channels==1 || channels==2) && block>0 && block<=4096,

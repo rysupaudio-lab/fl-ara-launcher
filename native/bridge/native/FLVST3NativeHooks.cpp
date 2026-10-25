@@ -659,8 +659,8 @@ tresult PLUGIN_API processorProcess(void* self,Vst::ProcessData& data) {
         // Standard host-owned VST3 realtime queue accessor only. Empty queue
         // objects are normal and must not discard every cached ARA block.
         const auto parameterCount=data.inputParameterChanges->getParameterCount();
-        if(parameterCount>0)runtime->config.callbacks.inputParameterChangesObserved(instance,
-            data.inputParameterChanges,parameterCount,threadInfo(),runtime->config.callbackContext);
+        if(parameterCount!=0)runtime->config.callbacks.inputParameterChangesObserved(instance,
+            data.inputParameterChanges,parameterCount,data.numSamples,threadInfo(),runtime->config.callbackContext);
     }
     if(callbacks(runtime)&&runtime->config.callbacks.beforeProcess)
         runtime->config.callbacks.beforeProcess(instance,data,threadInfo(),runtime->config.callbackContext);

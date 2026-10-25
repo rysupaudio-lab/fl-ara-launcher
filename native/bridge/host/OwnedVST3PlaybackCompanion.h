@@ -29,6 +29,7 @@ public:
     Bytes saveState() override;
     void restoreState(const Bytes&) override;
     std::uintptr_t ownedComponentAddress() const noexcept override;
+    OrdinaryParameterSnapshot restoredOrdinaryParameters()const noexcept override;
     void startOwnedPlayback(double,int,int,bool) override;
     void renderOwnedPlaybackBlock(std::int64_t,int,float* const[]) override;
     std::uint32_t actualLatencySamples() const override;

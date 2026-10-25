@@ -1,80 +1,48 @@
-# FL ARA Launcher — native candidate source
+# FL ARA Launcher
 
-An independent, experimental Apple Silicon macOS launcher for a **private copy**
-of the owner's licensed FL Studio 2026 **26.1.7.5421**. This source is under active
-normal-app integration. It is not yet a qualified public ARA patch.
+An experimental ARA 2 integration for **FL Studio 2026 26.1.7.5421 on Apple Silicon Macs**. It runs your licensed FL Studio in a private application copy and keeps your installed FL application unchanged.
 
-The Swift/AppKit application needs no Python or developer tools at runtime. Build
-and packaging tools use Python and Xcode command-line tools on the build machine.
-The app contains only the launcher, our native helper, documentation, and license;
-no Image-Line application files, third-party plugins, or license keys are shipped.
+## Install
 
-## Install and open
+1. Download the **arm64 DMG** from this repository’s Releases page.
+2. Open it and drag **FL ARA Launcher** to **Applications**.
+3. Open **FL ARA Launcher** and choose **Open a backed-up project…**.
+4. Choose your licensed FL Studio application if prompted. Work in the private FL window and keep the launcher open.
+5. Save your project, then quit that FL window normally when finished.
 
-1. Open the DMG and drag **FL ARA Launcher** to Applications.
-2. Open **FL ARA Launcher**, then choose **Open a backed-up project…**.
-3. Choose your licensed FL application if it is installed somewhere else.
-4. Use the private FL window for ARA editing and project saves. Quit that FL window normally when finished; keep the launcher open until it reports completion.
+No Terminal commands, Python or developer tools are needed. Your ARA plugins must be installed and licensed separately. No Image-Line application files, plugin binaries or license keys are included.
 
-No Terminal commands or developer tools are needed. This candidate accepts the
-exact Apple Silicon FL Studio 26.1.7.5421 build; other FL versions are refused.
-The installer is being prepared for its final normal-app checks.
+**Projects containing this integration’s ARA edits must be reopened and saved through FL ARA Launcher.** Ordinary unpatched FL does not understand its extended component state and may discard ARA edits or plugin settings when saving. Keep an untouched project backup.
 
-## Preservation contract
+## Compatibility
 
-- Verify the exact OsxFL and FLEngine SHA-256 pins and original Image-Line Team
-  N68WEP5ZZZ signature, before and after each session.
-- Permit unrelated installed FL instances and independent launcher copies using
-  distinct cache roots. Never attach, hide, adopt,
-  signal, or terminate a pre-existing/user FL instance.
-- Make a signature-preserving APFS clone under an owned cache run UUID. Cross-volume
-  full copying is allowed only on the explicitly selected mounted Razer SSD after
-  non-symlink-following source sizing proves the whole copy plus 5 GiB reserve fits.
-  There is no automatic internal-disk full-copy fallback. Launch its executable directly with `posix_spawn`, never `open`.
-- Keep all private home/preferences/user data paths within that owned run, reject
-  symlink ancestors, and synthesize only the private Shared data registry setting.
-  Do not copy the user's registry, license, or whole home. The integration helper
-  must preserve legitimate read-only authorization without duplicating secrets.
-- Bind helper admission to exact executable, parent PID, run UUID and directory.
-  Test mode admits only the `Pro Tools Audio Bridge 2-A_UID` audio-device UID. Normal mode
-  allows the user's chosen normal audio device.
-- Select only an existing backed-up `.flp` project, passed as one absolute path
-  argument. Current-engine static parser proof is recorded in the integration
-  `fl/PROJECT_ARGUMENT.md`; no `--` or `--args` separator is added. Runtime opening
-  must still be confirmed through the actual current native project and graph.
-- Remove only this exact application copy after its child and every live process
-  whose executable path equals the private executable are confirmed exited.
-  Any unbridged duplicate causes a visible error; no duplicate is adopted or stopped.
-  Preserve every live process, copy and lock if the launcher exits or startup fails.
-  Reopen the launcher and use **Clean finished session** after quitting that copy.
-- Record baseline/current `.flp` handlers and unregister only an owned application
-  copy after every process using it exits. Never write a global default handler;
-  preserve and record changes made during the session. Keep diagnostics under `~/Library/Caches/FLARALauncher/runs`.
+| Requirement | Current scope |
+|---|---|
+| Mac | Apple Silicon / arm64 |
+| FL Studio | Original Image-Line-signed **26.1.7.5421**; other builds are refused |
+| macOS | App deployment minimum **15.4**; native evidence so far is from **macOS 27.0 (26A428)** |
+| Audio | **48 kHz**, resident PCM16 mono/stereo source audio |
+| Insert placement | One ARA effect per mixer insert, first in the effect chain |
+| Source processing | No source stretching or source-rate conversion; no plugin latency or tail in this initial route |
+| Plugin evidence | Real autochoir 1.0.0 VST3 integration work; compatibility is plugin-specific |
 
-A child-only `sandbox-exec` profile denies writes to the original FL application,
-Image-Line preference directory and existing preference domain files, configured
-original user-data directory, and installed plugin directories/backing bundles.
-It permits ordinary selected project backups and private caches. Physical paths
-are resolved with Darwin `realpath`. A private shell trampoline sets the sealed
-helper path into `DYLD_INSERT_LIBRARIES` after entering the sandbox (SIP may strip
-DYLD variables on the system sandbox executable), then execs the exact copied
-OsxFL, retaining the launcher as parent. No original registry/license is copied.
-Normal-app tests must independently verify preservation and compatibility.
+Candidate **0.1.0-candidate.12** contains the native-save, slot-bypass and ready-gated export integration. Its release notes must identify the exact completed runtime evidence; source compilation alone is not audio or recall qualification. This is an experimental release, not general ARA conformance or support for every plugin, DAW version or Mac.
 
-ARA project saves use our component-state envelope to retain both the genuine
-ARA archive and the plugin's ordinary state. **Reopen and save those projects
-through this launcher.** Unpatched FL does not understand this extension and
-may discard plugin settings or ARA edits when saving. Keep an untouched project backup.
+Source caches prepare while playback is stopped. An ARA edit during playback can stop playback for preparation; restart playback explicitly after preparation completes.
 
-The current test profile is 48 kHz resident PCM16 mono/stereo audio with no
-stretching, source-rate conversion, plugin latency or tail. Use one ARA effect
-per mixer insert, placed first in its effect chain. Source caches are prepared
-while stopped. An ARA edit during playback can stop playback for rebuilding;
-playback remains stopped for an explicit restart. First Play before preparation
-is complete requires stopping and waiting for preparation. These limits are
-separate from actual plugin compatibility, which still requires native testing.
+## Your installed FL stays intact
 
-## Build without launching FL
+The launcher verifies the original Image-Line signature and exact application hashes, creates its own temporary app/home/preferences, and denies writes to the installed DAW, installed plugins and normal FL preferences/user-data directories. Legitimate authorization is read without copying license data.
+
+Other installed DAW sessions are left alone. A failed or interrupted launcher preserves its private session so you can save your work. After that private FL process exits normally, **Clean finished session** removes its finished copy. Diagnostics stay under `~/Library/Caches/FLARALauncher/runs`.
+
+The private copy normally uses a same-volume APFS clone. If FL is on another volume, the launcher currently supports a full-copy fallback only on an explicitly selected mounted **Razer SSD**, after checking space. It has no automatic internal-disk full-copy fallback. Very long cache paths are refused because this FL build truncates native template paths; use the default cache or a short real path.
+
+To uninstall, drag only **FL ARA Launcher.app** to Trash after its private sessions have exited. Your installed FL Studio remains in place.
+
+## Build from source
+
+Build tools require Apple Silicon, Python and Xcode command-line tools; the installed launcher does not.
 
 ```sh
 ./build.sh --compile-only
@@ -82,53 +50,20 @@ separate from actual plugin compatibility, which still requires native testing.
 'dist/FL-ARA-Launcher-compilecheck' --check
 ```
 
-The self-test uses only disposable directories and never launches FL. `--check`
-reads the installed application and verifies vendor signatures and exact hashes.
-
-## Build the application with the qualified native helper
+Build the app with the exact helper and its matching manifest:
 
 ```sh
-./build.sh --helper /path/to/FLAppBridge.dylib --helper-manifest /path/to/helper.json
-python3 tools/package_app.py --identity 'Developer ID Application: …'
+./build.sh --helper /path/FLAppBridge.dylib --helper-manifest /path/helper.json --output /path/build
+/opt/homebrew/bin/python3.13 tools/package_app.py \
+  --app '/path/build/FL ARA Launcher.app' --output /path/packages \
+  --identity 'Developer ID Application: …' \
+  --version 0.1.0-candidate.12 --stem FL-ARA-Launcher-0.1.0-candidate.12-arm64
 ```
 
-The helper manifest must be issued by the integration owner, have schema
-`rysup.fl-ara-helper/1`, `runtime_ready: true`, `binary: FLAppBridge.dylib`, and a
-`sha256` matching the exact signed helper bytes. Missing, unready, or placeholder
-helpers cannot be packaged or launched. The packager refreshes the binary seal
-after signing the helper and before signing the application.
+The helper must be signed and hash-bound to a ready build manifest. Signing, notarization, runtime evidence and publication are separately recorded. See [candidate release preparation](docs/CANDIDATE_12_RELEASE.md).
 
-Packaging produces a drag-to-Applications DMG, ZIP and SHA-256 receipt. Signing,
-notarization, normal-app testing, third-party compatibility qualification and
-public distribution are separate recorded states. Builds produce owner-local qualification packages. A qualified public release
-still requires actual normal-app and third-party runtime evidence.
+The internal CLI also accepts `--headless-export BACKED_UP.flp` with normal physical-device mode. It opens the same private normal FL application, waits for current ARA preparation and writes only `export.wav` plus a result receipt inside its new owned run. It never saves or quits automatically. A result file or native Boolean alone is not an audio-compatibility claim. The native export may create its own render form; this route requires no computer-use gestures.
 
-CLI: `--version`, `--check`, `--fl PATH`, `--cache PATH`, `--cleanup`,
-`--test-device "Pro Tools Audio Bridge 2-A_UID"`, or one backed-up `.flp` path. No hidden
-runtime automation is activated by the offline checks.
+## License
 
-Use `--cache-root "/Volumes/Razer SSD/.../FLARALauncher"` or the absolute
-`RYSUP_FLARA_CACHE_ROOT` environment variable to select an external cache. The
-launcher rejects a private app location whose physical path plus the supported
-build's longest template sidecar suffix exceeds 255 UTF-16 units. FL's native
-template reader truncates longer filenames. Use a shorter real cache location,
-such as `/Volumes/Razer SSD/Rys Up Audio Archive/FL ARA`; no symlink or
-automatic fallback is used. The default cache is subject to the same check.
-Other bundled native text readers may need separate path qualification; this
-guard covers the observed template reader only.
-The supported bundle contains 831 `.nfo` files, with a longest app-relative suffix
-of 142 UTF-16 units. Keeping the app prefix at most 113 units also keeps all those
-paths within 255 units as a conservative planning measure. Use of the same
-limited reader for those other files has not been established.
-The private normal-app registry seeds FL Studio26/Devices/Audio output Sample rate
-(Type2) at48000. Only test mode adds Device name (Type2)
-`4Pro Tools Audio Bridge 2-A`; normal mode leaves the user's device unspecified.
-Neither branch changes global preferences or duplicates the original registry.
-The launcher waits180seconds for exact-run/exact-PID `fl-ara-status.json`
-`runtime_helper_admitted` + `native_engine_ready`; a late live process is preserved.
-Build module caches and temporary files stay under the chosen `--output` directory.
-
-macOS native file-panel navigation history may be shared through the system panel
-service. DAW/audio registry isolation remains in place. Qualification tests capture
-and guard restoration of known changes they caused; they preserve independent
-user changes. FL-specific navigation keys have not yet been established.
+MIT for the launcher/integration code. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled SDK notices. Independent of Image-Line and plugin vendors.

@@ -169,15 +169,13 @@ struct Callbacks {
     // bypass calls. Native original is still invoked exactly once ordinarily.
     void (*nativeProcessTelemetry)(InstanceRecord&,const NativeProcessTelemetry&,
                                    const ThreadInfo&,void*) noexcept=nullptr;
-    // Invalidate only pre-stored cache gates/dirty atomics when the actual native
-    // inputParameterChanges queue reports >0 parameters, BEFORE beforeProcess
-    // or original processing. The only SDK query in this path is its standard
-    // realtime getParameterCount(), once when this observer is enabled and the
-    // actual queue pointer is nonnull. Empty queues do NOT invalidate. The actual
-    // count is supplied as POD; queue pointer is synchronous/borrowed only.
-    // No parameter IDs/points/value calls, model calls, allocation or locks.
+    // Actual borrowed realtime input queue, BEFORE beforeProcess/original.
+    // Count and ProcessData.numSamples are POD. Owner may inspect bounded queue
+    // IDs/point counts/points through their standard realtime accessors only;
+    // no controller/model calls, allocation, locks or retained borrowed pointers.
+    // Unknown, malformed and non-echo changes must invalidate pre-stored gates.
     void (*inputParameterChangesObserved)(InstanceRecord&,Steinberg::Vst::IParameterChanges*,
-                                          Steinberg::int32 actualParameterCount,const ThreadInfo&,void*) noexcept=nullptr;
+                                          Steinberg::int32 actualParameterCount,Steinberg::int32 actualSampleCount,const ThreadInfo&,void*) noexcept=nullptr;
     void (*viewCreated)(InstanceRecord&,Steinberg::FIDString,Steinberg::IPlugView*,const ThreadInfo&,void*) noexcept=nullptr;
     // Actual successful native public parameter calls. These may be RT: owner
     // does ONLY pre-stored cache-gate invalidation/dirty atomics, never SDK,

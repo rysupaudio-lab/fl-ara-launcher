@@ -5,7 +5,7 @@ import Darwin
 import CoreServices
 import UniformTypeIdentifiers
 
-let launcherVersion = "0.1.0-candidate.11"
+let launcherVersion = "0.1.0-candidate.12"
 let enginePath = "Contents/Libs/FLEngine_x64.dylib"
 let executablePath = "Contents/MacOS/OsxFL"
 let engineHash = "8d23eebf0fc63fdd1957ba2c8d0f1f1d4e053a9f43173d3c22606c47ace7b76d"
@@ -338,7 +338,8 @@ final class Session {
     var process: OwnedChild?
     var changed: (String) -> Void = { _ in }
     init(cache: URL, helper: URL) { self.cache = cache.standardizedFileURL; self.helper = canonical(helper) }
-    func launch(source: URL, project: URL?, testDevice: String? = nil) throws {
+    func launch(source: URL, project: URL?, testDevice: String? = nil, headlessExport: Bool = false) throws {
+        guard !headlessExport || (project != nil && testDevice == nil) else { throw fail("--headless-export requires a backed-up project and normal physical-device mode.") }
         if let testDevice, testDevice != "Pro Tools Audio Bridge 2-A_UID" { throw fail("Test mode permits only Pro Tools Audio Bridge 2-A_UID.") }
         let admission = try validateHelper(helper)
         if admission["runtime_admission_scope"] as? String == "bare-startup-test-only" {
@@ -366,6 +367,15 @@ final class Session {
         var operationError: Error?
         var nativeStartupConfirmed = false
         do {
+            if headlessExport, let project {
+                receipt["headless_export_requested"] = true
+                let output = run.appendingPathComponent("export.wav")
+                guard !fm.fileExists(atPath: output.path) else { throw fail("Owned export output already exists.") }
+                try jsonWrite(["schema": "rysup.fl-ara-owned-export/1", "run_id": runID,
+                               "project": project.path, "project_sha256": try digest(project),
+                               "output": output.path], run.appendingPathComponent("headless-export-request.json"))
+                try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: run.appendingPathComponent("headless-export-request.json").path)
+            }
             try jsonWrite(receipt, manifest)
             try jsonWrite(["launcher_pid": getpid(), "session": manifest.path], lock.appendingPathComponent("owner.json"))
             changed("Verifying and preparing a private FL Studio copy…")
@@ -640,12 +650,13 @@ if args.isEmpty || args == ["--gui"] {
     withExtendedLifetime(delegate) { app.run() }
 } else {
     do {
-        var source = URL(fileURLWithPath: "/Applications/FL Studio 2026.app"), project: URL?, cache = defaultCache(); var check = false, cleanup = false; var testDevice: String?
+        var source = URL(fileURLWithPath: "/Applications/FL Studio 2026.app"), project: URL?, cache = defaultCache(); var check = false, cleanup = false, headlessExport = false; var testDevice: String?
         while !args.isEmpty {
             let arg = args.removeFirst()
             switch arg {
             case "--test-device":
                 guard !args.isEmpty else { throw fail("--test-device requires a UID.") }; testDevice = args.removeFirst()
+            case "--headless-export": headlessExport = true
             case "--self-test": try selfTest(); exit(0)
             case "--version": print(launcherVersion); exit(0)
             case "--check": check = true
@@ -657,6 +668,6 @@ if args.isEmpty || args == ["--gui"] {
         }
         if check { let data = try JSONSerialization.data(withJSONObject: inspect(source), options: [.prettyPrinted, .sortedKeys]); print(String(decoding: data, as: UTF8.self)) }
         else if cleanup { print(try cleanupFinishedSession(cache.standardizedFileURL)) }
-        else { try Session(cache: cache, helper: bundledHelper()).launch(source: source, project: project, testDevice: testDevice) }
+        else { try Session(cache: cache, helper: bundledHelper()).launch(source: source, project: project, testDevice: testDevice, headlessExport: headlessExport) }
     } catch { fputs("FL ARA Launcher: \(error.localizedDescription)\n", stderr); exit(1) }
 }

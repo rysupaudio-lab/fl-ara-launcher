@@ -3,6 +3,7 @@
 #include <ARA_API/ARAInterface.h>
 #include <ARA_Library/Dispatch/ARAHostDispatch.h>
 #include <atomic>
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -117,9 +118,18 @@ public:
 };
 // A separately CREATED/OWNED transient playback child, never the borrowed native
 // editor component. Implementations control only this own child's SDK lifecycle.
+// Fixed, model-thread readback of the exact ordinary state restored into an
+// owned rendering child. Addresses are diagnostic identity values only.
+struct OrdinaryParameterSnapshot {
+    struct Row {std::uint32_t id=0;double normalized=0;std::int32_t flags=0;};
+    static constexpr std::size_t capacity=128;
+    std::array<Row,capacity> rows{};std::uint32_t count=0;
+    std::uintptr_t ownedComponent=0,ownedController=0;bool valid=false;
+};
 class OwnedPlaybackCompanion : public Companion {
 public:
     virtual std::uintptr_t ownedComponentAddress() const noexcept = 0;
+    virtual OrdinaryParameterSnapshot restoredOrdinaryParameters()const noexcept{return {};}
     virtual void startOwnedPlayback(double sampleRate,int channels,int maximumBlock,bool offline) = 0;
     virtual void renderOwnedPlaybackBlock(std::int64_t samplePosition,int frames,float* const output[]) = 0;
     virtual std::uint32_t actualLatencySamples() const = 0;
@@ -139,6 +149,7 @@ struct WholeSourceCacheOptions {
 };
 struct WholeModificationSourceCache {
     struct ContentReadiness {ARA::ARAContentType type;bool actualContentAvailable=false;};
+    OrdinaryParameterSnapshot restoredOrdinaryParameters;
     SourceDescriptor source;
     std::string modificationID;
     std::vector<std::vector<float>> channels;

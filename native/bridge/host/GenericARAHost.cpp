@@ -711,6 +711,7 @@ WholeModificationSourceCache HostController::renderWholeModificationSourceCache(
             aux.companion->restoreState(options.ordinaryCompanionStateBeforeActivation);
             cache.ordinaryCompanionStateApplied=true;
             cache.ordinaryCompanionStateBytes=options.ordinaryCompanionStateBeforeActivation.size();
+            cache.restoredOrdinaryParameters=aux.companion->restoredOrdinaryParameters();
         }
         const std::string label="_RysUp_Internal_Whole_Source_Cache_"+std::to_string(cache.generation);
         p->beginEditing();

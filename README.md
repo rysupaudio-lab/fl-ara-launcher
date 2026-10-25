@@ -52,7 +52,7 @@ Normal-app tests must independently verify preservation and compatibility.
 ARA project saves use our component-state envelope to retain both the genuine
 ARA archive and the plugin's ordinary state. **Reopen and save those projects
 through this launcher.** Unpatched FL does not understand this extension and
-may discard the ARA state when saving. Keep an untouched project backup.
+may discard plugin settings or ARA edits when saving. Keep an untouched project backup.
 
 The current test profile is 48 kHz resident PCM16 mono/stereo audio with no
 stretching, source-rate conversion, plugin latency or tail. Use one ARA effect

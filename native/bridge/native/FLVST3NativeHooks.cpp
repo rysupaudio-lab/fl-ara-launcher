@@ -648,13 +648,11 @@ tresult PLUGIN_API processorProcess(void* self,Vst::ProcessData& data) {
     auto* slot=slotFor(self);auto function=original<Process>(slot,9);
     if(bypass()||!actualObject(slot,self))return function(self,data);
     auto& instance=*slot->instance;
-    instance.actualNativeProcessCallsInFlight.fetch_add(1,std::memory_order_seq_cst);
-    if(!instance.nativeProcessAllowed.load(std::memory_order_seq_cst)){
-        instance.actualNativeProcessCallsInFlight.fetch_sub(1,std::memory_order_seq_cst);
+    auto flight=instance.nativeProcessAdmission.tryEnter();
+    if(!flight){
         instance.blockedProcessCallbacks.fetch_add(1,std::memory_order_relaxed);
         return zeroActualOutputs(data); // no native process and no owner RT callbacks
     }
-    struct InFlight {InstanceRecord& instance;~InFlight(){instance.actualNativeProcessCallsInFlight.fetch_sub(1,std::memory_order_seq_cst);}} flight{instance};
     struct ProcessScope {ProcessScope(){++nativeProcessDepth;++hookDepth;}~ProcessScope(){--hookDepth;--nativeProcessDepth;}} processScope;
     auto* runtime=slot->runtime;
     if(data.inputParameterChanges&&callbacks(runtime)&&runtime->config.callbacks.inputParameterChangesObserved){
@@ -745,11 +743,12 @@ tresult captureOriginalComponentState(InstanceRecord& instance,IBStream& destina
     // This function is an explicit own diagnostic. Do not route it through the
     // virtual getState, fabricate a native caller PC, or invoke owner state glue.
     auto* runtime=activeRuntime.load(std::memory_order_acquire);
+    const auto admission=instance.nativeProcessAdmission.snapshot();
     if(!runtime||!pthread_main_np()||nativeProcessDepth||originalOnlyDiagnosticStateDepth||nativeOriginalStateMethodDepth
         ||!instance.nativeAlive.load(std::memory_order_acquire)
         ||!instance.nativeInitialized.load(std::memory_order_acquire)
         ||instance.nativeTerminated.load(std::memory_order_acquire)
-        ||instance.actualNativeProcessCallsInFlight.load(std::memory_order_seq_cst)!=0)return kResultFalse;
+        ||admission.allowed||admission.activeCount!=0)return kResultFalse;
     auto* component=instance.actualComponent.load(std::memory_order_acquire);
     if(!component)return kResultFalse;
     StateFunction function=nullptr;

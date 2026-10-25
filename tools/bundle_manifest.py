@@ -26,11 +26,16 @@ def sanitized_manifest(raw, helper, root):
             raise ValueError('Routing-only candidate cannot claim runtime qualification')
         result.update(restrictions);result['intended_runtime_scope']=scope
     if 'candidate_kind' in raw:
-        if raw['candidate_kind']!='full-compiled-device-gate-unqualified' or raw.get('device_start_admission_compiled') is not True or raw.get('actual_audio_io_qualified') is not False:
+        kinds={'full-compiled-device-gate-unqualified','full-compiled-cache-queue-and-process-admission-unqualified'}
+        if raw['candidate_kind'] not in kinds or raw.get('device_start_admission_compiled') is not True or raw.get('actual_audio_io_qualified') is not False:
             raise ValueError('Compiled device-gate candidate metadata is inconsistent')
         if raw.get('routing_only') is True or result['runtime_admission_scope']!='owned-qualification-candidate' or any(result[k] for k in FLAGS):
             raise ValueError('Compiled device-gate candidate remains runtime unqualified')
         result.update(candidate_kind=raw['candidate_kind'],device_start_admission_compiled=True,actual_audio_io_qualified=False)
+        if raw['candidate_kind']=='full-compiled-cache-queue-and-process-admission-unqualified':
+            for field in ('strong_process_admission_compiled','authority_only_internal_cache_invalidation_compiled'):
+                if raw.get(field) is not True:raise ValueError('Cache/process-admission compile metadata is inconsistent')
+                result[field]=True
     revision=raw.get('source_revision')
     if revision is None:
         revision=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()

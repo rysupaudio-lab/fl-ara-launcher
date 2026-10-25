@@ -31,6 +31,11 @@ class PublicManifest(unittest.TestCase):
    raw={'schema':'rysup.fl-ara-helper/1','binary':helper.name,'runtime_ready':True,'source_revision':'a'*40,'candidate_kind':'full-compiled-device-gate-unqualified','device_start_admission_compiled':True,'actual_audio_io_qualified':False}
    value=m.sanitized_manifest(raw,helper,root);self.assertEqual(value,m.sanitized_manifest(value,helper,root))
    self.assertIs(value['device_start_admission_compiled'],True);self.assertIs(value['actual_audio_io_qualified'],False);self.assertNotIn('routing_only',value)
+   cache=dict(raw,candidate_kind='full-compiled-cache-queue-and-process-admission-unqualified',strong_process_admission_compiled=True,authority_only_internal_cache_invalidation_compiled=True)
+   compiled=m.sanitized_manifest(cache,helper,root);self.assertEqual(compiled,m.sanitized_manifest(compiled,helper,root));self.assertFalse(compiled['runtime_qualified'])
+   for field in ['strong_process_admission_compiled','authority_only_internal_cache_invalidation_compiled']:
+    self.assertIs(compiled[field],True)
+    with self.assertRaises(ValueError):m.sanitized_manifest(dict(cache,**{field:False}),helper,root)
    for change in [{'actual_audio_io_qualified':True},{'device_start_admission_compiled':False},{'runtime_qualified':True},{'candidate_kind':'qualified'}]:
     with self.subTest(change=change):
      with self.assertRaises(ValueError):m.sanitized_manifest(dict(raw,**change),helper,root)

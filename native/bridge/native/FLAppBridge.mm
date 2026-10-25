@@ -131,7 +131,7 @@ class NativeMixBoundaryDeferred final:public lab::NativeModelBoundaryUnavailable
 void observeAndRequireNativeMixBoundary(BridgeRecord& r){
     r.modelMixBoundaryAvailable=false;r.lastNativeMixBoundary=observeActualNativeMixBoundary();
     if(!r.lastNativeMixBoundary.available()){
-        r.dirty=true;throw NativeMixBoundaryDeferred(nativeMixBoundaryReason(r.lastNativeMixBoundary.reason));
+        throw NativeMixBoundaryDeferred(nativeMixBoundaryReason(r.lastNativeMixBoundary.reason));
     }
     r.modelMixBoundaryAvailable=true;
 }
@@ -165,17 +165,17 @@ struct Boundary {
     explicit Boundary(BridgeRecord& value):r(value){
         demand(pthread_main_np()&&nativeApplicationAdmitted()&&stopped(),"actual normal FL owner must be stopped on main thread");
         demand(!r.boundary&&r.alive&&!r.teardown&&revalidateActualNativeInsert(r.insert),"native insert boundary owner is unavailable/reentrant");
-        previous=r.native->nativeProcessAllowed.exchange(false);
+        previous=r.native->nativeProcessAdmission.exchangeAllowed(false);
         const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
-        while(r.native->actualNativeProcessCallsInFlight.load()){
-            if(std::chrono::steady_clock::now()>deadline){r.native->nativeProcessAllowed=previous;throw std::runtime_error("actual native process drain timed out");}
+        while(r.native->nativeProcessAdmission.activeCount()){
+            if(std::chrono::steady_clock::now()>deadline){r.native->nativeProcessAdmission.setAllowed(previous);throw std::runtime_error("actual native process drain timed out");}
             std::this_thread::yield();
         }
-        try{observeAndRequireNativeMixBoundary(r);}catch(...){r.native->nativeProcessAllowed=!r.initialPrimePending.load()&&previous;throw;}
+        try{observeAndRequireNativeMixBoundary(r);}catch(...){r.native->nativeProcessAdmission.setAllowed(!r.initialPrimePending.load()&&previous);throw;}
         r.boundary=true;runtime().anyBoundary=true;
     }
     ~Boundary(){r.boundary=false;r.modelMixBoundaryAvailable=false;runtime().anyBoundary=false;
-        r.native->nativeProcessAllowed=!r.initialPrimePending.load()&&r.alive.load()&&!r.teardown;}
+        r.native->nativeProcessAdmission.setAllowed(!r.initialPrimePending.load()&&r.alive.load()&&!r.teardown);}
 
 };
 struct TeardownBoundary {
@@ -186,9 +186,9 @@ struct TeardownBoundary {
             &&r.observedInactive&&r.observedStopped,"native component has not actually stopped/deactivated before its original terminate");
         demand(r.native&&r.native->ownerData.load()==&r&&r.native->actualComponent.load()==reinterpret_cast<Steinberg::Vst::IComponent*>(r.identity.actualComponent)
             &&r.native->nativeAlive&&r.native->nativeInitialized&&!r.native->nativeTerminated,"exact known native component/lifecycle identity missing");
-        r.native->nativeProcessAllowed=false;
+        r.native->nativeProcessAdmission.shutdown();
         const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
-        while(r.native->actualNativeProcessCallsInFlight.load()){
+        while(r.native->nativeProcessAdmission.activeCount()){
             demand(std::chrono::steady_clock::now()<=deadline,"actual native process drain timed out before original terminate");std::this_thread::yield();
         }
         r.teardownCallerVerified=true;r.synchronousTerminating=true;
@@ -208,11 +208,12 @@ lab::FLNativeModelOptions modelOptions(std::int32_t actualMixerInsert){
 lab::StandaloneNativeHold Adapter::verifyActualNativeHold(const lab::StandaloneInstanceIdentity& id)const{
     auto* r=runtime().byID(id.instanceID);lab::StandaloneNativeHold hold;
     if(!r)return hold;
-    hold.actualOwnedNativeHold=nativeApplicationAdmitted()&&r->boundary&&r->modelMixBoundaryAvailable&&!r->native->nativeProcessAllowed.load();
+    const auto admission=r->native->nativeProcessAdmission.snapshot();
+    hold.actualOwnedNativeHold=nativeApplicationAdmitted()&&r->boundary&&r->modelMixBoundaryAvailable&&!admission.allowed;
     hold.actualNativeStopped=stopped();hold.outsideNativeRenderStateAndLifecycleCalls=r->boundary;
     hold.actualOwnerAndCurrentModelThreadVerified=pthread_main_np()&&r->alive&&revalidateActualNativeInsert(r->insert)
         &&id.actualNativeEngineOwner==nativeApplication().engineInstance;
-    hold.actualNativeRenderCallsInFlight=r->native->actualNativeProcessCallsInFlight.load();return hold;
+    hold.actualNativeRenderCallsInFlight=admission.activeCount;return hold;
 }
 lab::StandaloneNativeTeardownBoundary Adapter::verifyActualNativeTeardownBoundary(const lab::StandaloneInstanceIdentity& id)const{
     lab::StandaloneNativeTeardownBoundary proof;auto* r=runtime().byID(id.instanceID);if(!r)return proof;
@@ -223,13 +224,14 @@ lab::StandaloneNativeTeardownBoundary Adapter::verifyActualNativeTeardownBoundar
     proof.insideSynchronousNativeBeforeOriginalTerminate=r->synchronousTerminating&&r->teardownCallerVerified;
     proof.onActualModelThread=pthread_main_np();proof.actualOriginalSetActiveFalseObserved=r->observedInactive&&!r->active;
     proof.actualOriginalSetProcessingFalseObserved=r->observedStopped&&!r->processing;
-    proof.ownNativeProcessGateClosed=!r->native->nativeProcessAllowed.load();proof.actualOriginalProcessCallsInFlight=r->native->actualNativeProcessCallsInFlight.load();
+    const auto admission=r->native->nativeProcessAdmission.snapshot();
+    proof.ownNativeProcessGateClosed=!admission.allowed;proof.actualOriginalProcessCallsInFlight=admission.activeCount;
     proof.nativeOriginalTerminateNotYetCalled=r->synchronousTerminating&&!r->native->nativeTerminated;return proof;
 }
 lab::StandaloneSnapshotData captureActualNativeSnapshotData(BridgeRecord& target,const lab::StandaloneInstanceIdentity& identity,bool metadataOnly){
-    auto* r=&target;
+    auto* r=&target;const auto admission=r->native->nativeProcessAdmission.snapshot();
     demand(pthread_main_np()&&nativeApplicationAdmitted()&&stopped()&&r->alive&&!r->teardown
-        &&!r->native->nativeProcessAllowed.load()&&r->native->actualNativeProcessCallsInFlight.load()==0,
+        &&!admission.allowed&&admission.activeCount==0,
         "actual native metadata capture requires stopped/drained owned component");
     demand(metadataOnly?r->actualNativeSaveMetadataCapture:(r->boundary&&r->modelMixBoundaryAvailable),
         "current RAM copy needs its actual model or guarded native-save metadata boundary");
@@ -275,7 +277,8 @@ lab::StandaloneSnapshotData Adapter::copyActualCurrentRAMAndClock(const lab::Sta
 }
 void Adapter::invalidateActualNativeOverlayImmediately(const std::string& id,std::uint64_t)noexcept{
     markActiveNativeSaveFailedFromAnyThread();
-    if(auto* r=runtime().byID(id))r->dirty=true;
+    // Authority-only callback. Actual edit requests use the separate enqueue
+    // mailbox; current-build maintenance must not make its own insert dirty.
     if(auto* overlay=runtime().overlayListener.load(std::memory_order_acquire))overlay->invalidateInstance(id);
 }
 void Adapter::enqueueModelThreadRebuild(const std::string& id)noexcept{if(auto* r=runtime().byID(id))r->dirty=true;}
@@ -330,7 +333,7 @@ lab::StandaloneNativeStateLoadAuthority loadAuthority(BridgeRecord& r,const hook
 }
 void fail(BridgeRecord& r,const std::string& reason)noexcept{
     if(!pthread_main_np()){r.fault=true;return;}
-    try{r.error=reason;r.disabled=true;r.dirty=false;if(runtime().overlay)runtime().overlay->invalidateInstance(r.identity.instanceID);
+    try{r.error=reason;r.disabled=true;r.dirty=false;r.native->nativeProcessAdmission.shutdown();if(runtime().overlay)runtime().overlay->invalidateInstance(r.identity.instanceID);
         if(runtime().coordinator&&!r.identity.instanceID.empty())runtime().coordinator->disableARAForInsert(r.identity.instanceID,reason);
         writeNativeApplicationEvent("ara_insert_unavailable",reason);r.fault=true;
     }catch(...){r.fault=true;}
@@ -412,13 +415,13 @@ void initialized(hooks::InstanceRecord& n,void*,Steinberg::FUnknown* context,Ste
                 &&actual->factory==expectedFactory&&!expectedFactory->moduleAssociationAmbiguous.load()
                 &&nativeApplication().engineInstance==expectedOwner&&actual->initializeCalls.load()==1&&actual->terminateCalls.load()==0
                 &&actual->setStateCalls.load()==0&&actual->activationCalls.load()==0&&actual->processingCalls.load()==0
-                &&actual->contextRequirementCalls.load()==0&&actual->editorViewCalls.load()==0&&actual->actualNativeProcessCallsInFlight.load()==0
+                &&actual->contextRequirementCalls.load()==0&&actual->editorViewCalls.load()==0&&actual->nativeProcessAdmission.activeCount()==0
                 &&revalidateActualNativeInsert(expected);
         };
         r->identity.instanceID=rt.coordinator->bindAfterOriginalInitialize(*component,r->identity,factory,proof);
         r->nativeCacheGate=rt.coordinator->cacheGate(r->identity.instanceID);
         if(rt.observeNativeDSP)r->nativeProcessObserver=std::make_unique<process_observer::NativeProcessObserver>(n);
-        n.nativeProcessAllowed=false; // No first original native process before an actual qualified initial prime.
+        n.nativeProcessAdmission.setAllowed(false); // No first original native process before an actual qualified initial prime.
         n.ownerData=r;n.stateInterceptionEnabled=true;r->next=rt.head.load();rt.head=r;rt.records.push_back(std::move(owned));
         publishAllControllerAssociationsOnMain();
         writeNativeApplicationEvent("actual_native_ara_component_bound",r->identity.instanceID);
@@ -502,9 +505,9 @@ bool sameSaveRequest(const NativeSaveRequest& a,const NativeSaveRequest& b)noexc
         &&a.nativeFlags==b.nativeFlags&&a.actualSaveType==b.actualSaveType&&a.directedTarget==b.directedTarget;
 }
 void closeAndDrainNativeSaveComponent(FrozenNativeSaveComponent& frozen){
-    auto& r=*frozen.record;frozen.previousProcessAllowed=r.native->nativeProcessAllowed.exchange(false);
+    auto& r=*frozen.record;frozen.previousProcessAllowed=r.native->nativeProcessAdmission.exchangeAllowed(false);
     const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
-    while(r.native->actualNativeProcessCallsInFlight.load()){
+    while(r.native->nativeProcessAdmission.activeCount()){
         demand(std::chrono::steady_clock::now()<=deadline,"native process drain timed out before file creation");std::this_thread::yield();
     }
 }
@@ -574,7 +577,7 @@ void nativeSaveFinished(const NativeSaveTransaction& transaction,void*)noexcept{
     auto& rt=runtime();++rt.nativeSaveFramesFinished;
     if(transaction.ownerCookie&&rt.nativeSaveFreeze.get()==transaction.ownerCookie){
         for(auto& entry:rt.nativeSaveFreeze->components){auto& r=*entry.record;
-            r.native->nativeProcessAllowed=entry.previousProcessAllowed&&r.alive&&!r.disabled&&!r.teardown&&!r.initialPrimePending&&r.native->nativeAlive&&!r.native->nativeTerminated;
+            r.native->nativeProcessAdmission.setAllowed(entry.previousProcessAllowed&&r.alive&&!r.disabled&&!r.teardown&&!r.initialPrimePending&&r.native->nativeAlive&&!r.native->nativeTerminated);
             // Guard commitBegun is not actual whole-file success/readback.
             // Conservatively re-announce real unsaved revisions after a refusal.
             if(transaction.failed||!rt.nativeSaveFreeze->precommitPassed)r.nativeDirtyRetryAfterSaveRefusal=true;
@@ -590,8 +593,9 @@ Steinberg::tresult serializeFrozenNativeProjectState(hooks::InstanceRecord& n,Br
         demand(rt.nativeSaveFreeze&&transaction->ownerCookie==rt.nativeSaveFreeze.get()
             &&sameSaveRequest(transaction->request,rt.nativeSaveFreeze->request),"actual native save has no frozen owner payload");
         FrozenNativeSaveComponent* frozen=nullptr;for(auto& entry:rt.nativeSaveFreeze->components)if(entry.record==r){frozen=&entry;break;}
-        demand(frozen&&frozen->prepared&&frozen->archive&&r->native==&n&&!r->native->nativeProcessAllowed
-            &&r->native->actualNativeProcessCallsInFlight==0,"component was not frozen/drained by actual native file-open preflight");
+        const auto admission=n.nativeProcessAdmission.snapshot();
+        demand(frozen&&frozen->prepared&&frozen->archive&&r->native==&n&&!admission.allowed
+            &&admission.activeCount==0,"component was not frozen/drained by actual native file-open preflight");
         rt.coordinator->validatePreparedEditorArchiveForNativeSave(r->identity.instanceID,*frozen->prepared,frozen->actualPreflight);
         auto* ordinary=new lab::fl_app::MemoryIBStream;const auto result=original(ordinary);lab::Bytes bytes=ordinary->bytes();ordinary->release();
         if(result!=kResultOk){markCurrentNativeSaveFailed();return result;}
@@ -696,7 +700,7 @@ Steinberg::tresult state(hooks::InstanceRecord& n,hooks::StateOperation operatio
             const bool magic=lab::fl_app::peekMagicAndRestorePosition(*stream);r->pendingLoad=loadAuthority(*r,info);
             if(!magic){r->pendingPlainLoad=true;const auto result=original(stream);runtime().coordinator->observeOriginalSetStateResult(r->identity.instanceID,result);if(result==kResultOk){r->dirty=true;runtime().coordinator->invalidateSourceCachesAndRequestRebuild(r->identity.instanceID);}return result;}
             auto envelope=lab::decodeFLStandaloneStateEnvelope(lab::fl_app::readRemaining(*stream));demand(envelope.has_value(),"recognized early archive decode failed");
-            demand(!r->pendingArchive,"a second native archive arrived before the first was resolved");r->pendingArchive=envelope->archive;r->dirty=true;r->initialPrimePending=true;r->native->nativeProcessAllowed=false;
+            demand(!r->pendingArchive,"a second native archive arrived before the first was resolved");r->pendingArchive=envelope->archive;r->dirty=true;r->initialPrimePending=true;r->native->nativeProcessAdmission.setAllowed(false);
             auto* ordinary=new lab::fl_app::MemoryIBStream(envelope->nativeComponentState);const auto result=original(ordinary);ordinary->release();
             runtime().coordinator->observeOriginalSetStateResult(r->identity.instanceID,result);if(result==kResultOk){r->dirty=true;runtime().coordinator->invalidateSourceCachesAndRequestRebuild(r->identity.instanceID);}return result;
         }
@@ -740,7 +744,7 @@ Steinberg::tresult state(hooks::InstanceRecord& n,hooks::StateOperation operatio
         // retain recognized archives, and forward only original ordinary bytes.
         try{
             if(r->pendingArchive&&r->pendingOrdinaryComponentState){
-                r->initialPrimePending=true;r->native->nativeProcessAllowed=false;
+                r->initialPrimePending=true;r->native->nativeProcessAdmission.setAllowed(false);
                 auto* ordinary=new lab::fl_app::MemoryIBStream(*r->pendingOrdinaryComponentState);const auto result=original(ordinary);ordinary->release();
                 r->pendingOrdinaryComponentState.reset();runtime().coordinator->observeOriginalSetStateResult(r->identity.instanceID,result);
                 runtime().coordinator->invalidateSourceCachesAndRequestRebuild(r->identity.instanceID);return result;
@@ -749,7 +753,7 @@ Steinberg::tresult state(hooks::InstanceRecord& n,hooks::StateOperation operatio
             if(lab::fl_app::peekMagicAndRestorePosition(*stream)){
                 auto envelope=lab::decodeFLStandaloneStateEnvelope(lab::fl_app::readRemaining(*stream));demand(envelope.has_value(),"recognized deferred archive decode failed");
                 demand(!r->pendingArchive,"a second native archive arrived before the pending one resolved");
-                r->pendingArchive=envelope->archive;r->initialPrimePending=true;r->native->nativeProcessAllowed=false;
+                r->pendingArchive=envelope->archive;r->initialPrimePending=true;r->native->nativeProcessAdmission.setAllowed(false);
                 auto* ordinary=new lab::fl_app::MemoryIBStream(envelope->nativeComponentState);const auto result=original(ordinary);ordinary->release();
                 runtime().coordinator->observeOriginalSetStateResult(r->identity.instanceID,result);runtime().coordinator->invalidateSourceCachesAndRequestRebuild(r->identity.instanceID);return result;
             }
@@ -867,7 +871,9 @@ bool status(){
         d[@"native_mix_boundary"]=@(nativeMixBoundaryReason(r->lastNativeMixBoundary.reason));d[@"native_mix_last_probe_available"]=@(r->lastNativeMixBoundary.available());
         d[@"native_mix_create"]=@(r->lastNativeMixBoundary.createResult);d[@"native_mix_join"]=@(r->lastNativeMixBoundary.joinResult);
         d[@"native_mix_trylock"]=@(r->lastNativeMixBoundary.tryLockResult);d[@"native_mix_unlock"]=@(r->lastNativeMixBoundary.unlockResult);
-        d[@"native_mix_identity_verified"]=@(r->lastNativeMixBoundary.nativeIdentityVerified);d[@"native_process_admission_allowed"]=@(r->native->nativeProcessAllowed.load());
+        const auto admission=r->native->nativeProcessAdmission.snapshot();
+        d[@"native_mix_identity_verified"]=@(r->lastNativeMixBoundary.nativeIdentityVerified);d[@"native_process_admission_allowed"]=@(admission.allowed);
+        d[@"native_process_admission_active_count"]=@(admission.activeCount);d[@"native_process_admission_generation"]=@(admission.generation);d[@"native_process_admission_permanently_closed"]=@(admission.permanentlyClosed);
         d[@"native_process_admission_blocked_callbacks"]=@(r->native->blockedProcessCallbacks.load());
         d[@"native_set_active_calls"]=@(r->native->activationCalls.load());d[@"native_set_processing_calls"]=@(r->native->processingCalls.load());
         d[@"native_set_active_enabled"]=@(r->active.load());d[@"native_set_processing_enabled"]=@(r->processing.load());
@@ -960,6 +966,9 @@ bool status(){
     data[@"source_overlay_installed"]=@(rt.overlayInstalled);data[@"inserts"]=inserts;data[@"error"]=@(rt.error.c_str());
     NSMutableArray* ownWindows=[NSMutableArray array];
     for(NSWindow* window in NSApp.windows){NSMutableDictionary* item=[NSMutableDictionary dictionary];
+        NSRect frame=window.frame;item[@"frame"]=@{@"x":@(frame.origin.x),@"y":@(frame.origin.y),@"width":@(frame.size.width),@"height":@(frame.size.height)};
+        item[@"backing_scale_factor"]=@(window.backingScaleFactor);
+        if(window.screen){NSRect screenFrame=window.screen.frame;item[@"screen_frame"]=@{@"x":@(screenFrame.origin.x),@"y":@(screenFrame.origin.y),@"width":@(screenFrame.size.width),@"height":@(screenFrame.size.height)};item[@"screen_backing_scale_factor"]=@(window.screen.backingScaleFactor);}
         item[@"title"]=window.title?:@"";item[@"visible"]=@(window.visible);item[@"miniaturized"]=@(window.miniaturized);
         item[@"key"]=@(window.keyWindow);item[@"main"]=@(window.mainWindow);item[@"document_edited"]=@(window.documentEdited);
         item[@"window_number"]=@(window.windowNumber);item[@"represented_url"]=window.representedURL.absoluteString?:@"";[ownWindows addObject:item];}
@@ -970,6 +979,8 @@ bool status(){
         @"parsed_registration_node_count":@(registration.parsedRegistrationNodeCount),@"parsed_registration_value_count":@(registration.parsedRegistrationValueCount),
         @"value_count":@(registration.registrationValueCount),@"read_count":@(registration.registrationReads),@"denied_write_count":@(registration.deniedRegistrationWrites),
         @"vendor_license_validity_proven":@NO};
+    NSScreen* primary=NSApp?NSScreen.screens.firstObject:nil;if(primary){NSRect frame=primary.frame;data[@"primary_screen_frame"]=@{@"x":@(frame.origin.x),@"y":@(frame.origin.y),@"width":@(frame.size.width),@"height":@(frame.size.height)};data[@"primary_screen_backing_scale_factor"]=@(primary.backingScaleFactor);}
+    data[@"window_geometry_appkit_coordinates"]=@YES;
     data[@"own_windows_diagnostic_only"]=ownWindows;data[@"own_application_active"]=@(NSApp.active);
     data[@"window_metadata_is_native_graph_proof"]=@NO;
     data[@"runtime_qualified"]=@NO;data[@"run_id"]=@(app.runID.c_str());data[@"pid"]=@(getpid());
@@ -1044,7 +1055,7 @@ void tick(const NativeApplication& app,void*)noexcept{
             if(r.disabled||!r.setupQualified||!stopped())continue;
             try{Boundary boundary(r);ensureOverlayAtModelBoundary();
                 refreshAtBoundary(r,true);rt.overlay->collectRetiredOnModelThread();}
-            catch(const lab::NativeModelBoundaryUnavailable& e){r.error=std::string("Native model boundary deferred: ")+e.what();r.dirty=true;}
+            catch(const lab::NativeModelBoundaryUnavailable& e){r.error=std::string("Native model boundary deferred: ")+e.what();if(!currentNativeCacheGenerationCoherent(r))r.dirty=true;}
             catch(const lab::SourceCacheNotReady& e){r.error=e.what();r.dirty=true;}
             catch(const lab::FLStandaloneDecodeError& e){
                 if(!r.graphApplied){r.error=std::string("ARA is waiting for supported current native source regions: ")+e.what();r.dirty=true;}

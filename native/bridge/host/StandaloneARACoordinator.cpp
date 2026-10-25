@@ -1,3 +1,4 @@
+#include "StandaloneCacheInvalidation.h"
 #include "StandaloneARACoordinator.h"
 #include "VST3ARAEntry.h"
 #include "OwnedVST3PlaybackCompanion.h"
@@ -71,19 +72,20 @@ struct StandaloneARACoordinator::Impl {
         std::string id;
         std::shared_ptr<StandaloneCacheGate> gate=std::make_shared<StandaloneCacheGate>();
         std::shared_ptr<StandaloneOwnerAdapter> adapter;
-        std::atomic<bool> rebuildQueued{false};
         std::atomic<bool> contractFailed{false};
         StandaloneARAEditRelay actualDirty;
+        StandaloneCacheTicket invalidateForCurrentRebuild()noexcept{
+            return invalidateStandaloneCacheAuthority(*gate,
+                [&](std::uint64_t epoch)noexcept{adapter->invalidateActualNativeOverlayImmediately(id,epoch);},
+                [&](std::uint64_t epoch)noexcept{adapter->queueActualNativeStopForCacheRebuild(id,epoch);});
+        }
         void invalidateForARAEdit(std::uint64_t revision)noexcept override{
-            const auto ticket=gate->invalidate();
-            // Close the gate before invoking any root queue/callback. A prior
-            // immutable batch is unauthorized immediately, on this thread.
-            adapter->invalidateActualNativeOverlayImmediately(id,ticket.epoch);
-            adapter->queueActualNativeStopForCacheRebuild(id,ticket.epoch);
-            actualDirty.forwardActualRevision(revision,[&](std::uint64_t actual)noexcept{
-                adapter->queueActualNativeDocumentDirtyFromARA(id,actual);
-            });
-            if(!rebuildQueued.exchange(true,std::memory_order_acq_rel))adapter->enqueueModelThreadRebuild(id);
+            invalidateStandaloneCacheForEdit(*gate,revision,
+                [&](std::uint64_t epoch)noexcept{adapter->invalidateActualNativeOverlayImmediately(id,epoch);},
+                [&](std::uint64_t epoch)noexcept{adapter->queueActualNativeStopForCacheRebuild(id,epoch);},
+                [&](std::uint64_t value)noexcept{actualDirty.forwardActualRevision(value,[&](std::uint64_t actual)noexcept{
+                    adapter->queueActualNativeDocumentDirtyFromARA(id,actual);});},
+                [&]()noexcept{adapter->enqueueModelThreadRebuild(id);});
         }
         void reportARAContractFailure(const char*)noexcept override{
             contractFailed=true;gate->closePermanently();adapter->invalidateActualNativeOverlayImmediately(id,gate->currentTicket().epoch);
@@ -355,7 +357,7 @@ void StandaloneARACoordinator::pollAtStoppedNativeBoundary(const std::string& id
 StandaloneSourceCacheBatch StandaloneARACoordinator::rebuildWholeSourceCaches(const std::string& id,const CapturedStandaloneSnapshot& snapshot,const WholeSourceCacheOptions& options){
     p->requireMain();Operation operation(p->operation);auto r=p->find(id);p->requireHold(r);p->validateToken(r,snapshot);
     demand(r->graphReady && r->applied && sameModel(r->applied->data.model,snapshot.data().model) && sameGraph(r->host->graphMetadata(),snapshot.data().graph),"source cache requires exact applied current native model/clock");
-    r->observer->invalidateForARAEdit(0);r->observer->rebuildQueued=false;const auto ticket=r->observer->gate->currentTicket();
+    const auto ticket=r->observer->invalidateForCurrentRebuild();
     const auto editRevision=r->host->editNotificationRevision();
     StandaloneSourceCacheBatch batch;batch.instanceID=id;batch.ticket=ticket;batch.captureSerial=snapshot.captureSerial();batch.actualEditNotificationRevision=editRevision;batch.native=snapshot.data().model;batch.gate=r->observer->gate;
     const auto plan=planStandaloneSourceCaches(snapshot.data().graph);batch.noSourceOverlayRequired=plan.noSourceOverlayRequired;

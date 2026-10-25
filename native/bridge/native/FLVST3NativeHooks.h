@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include "FLNativeProcessAdmission.h"
 
 namespace rysup::fl_ara::native_hooks {
 using ClassID = std::array<char,16>;
@@ -82,12 +83,10 @@ struct InstanceRecord {
     // Opaque owner policy only. Hooks never interpret/change these bits.
     std::atomic<std::uint32_t> ownerStateFlags{0};
     std::atomic<bool> stateInterceptionEnabled{false}; // opt-in only AFTER owner ARA admission
-    // Owner closes this gate, then waits for actualNativeProcessCallsInFlight=0
-    // before model/cache mutation (use seq_cst store/load, the default atomic
-    // ordering, for this owner-side close/wait). A later entrant increments before testing
-    // the closed gate and never calls native processing or owner callbacks.
-    std::atomic<bool> nativeProcessAllowed{true};
-    std::atomic<std::uint32_t> actualNativeProcessCallsInFlight{0};
+    // Owner closes this single-word gate and drains its admitted count before
+    // model/cache mutation. Closed rejected callbacks never join that count.
+    // One RAII lease spans every owner process callback and the native original.
+    NativeProcessAdmissionGate nativeProcessAdmission;
     std::atomic<std::uint64_t> blockedProcessCallbacks{0};
     std::atomic<bool> nativeAlive{true},nativeInitialized{false},nativeTerminated{false};
     std::atomic<std::uint32_t> initializeCalls{0},terminateCalls{0},setStateCalls{0},getStateCalls{0};

@@ -181,7 +181,11 @@ public:
     virtual StandaloneSnapshotData copyActualCurrentRAMAndClock(const StandaloneInstanceIdentity&)=0;
     // May run on an ARA notification thread. These must only close the actual
     // atomic overlay gate/enqueue work; never call ARA/native SDK or wait here.
+    // Authority only: also used inside the current cache build. Do not set the
+    // owner's rebuild-pending bit here; actual changes enqueue separately.
     virtual void invalidateActualNativeOverlayImmediately(const std::string&,std::uint64_t epoch)noexcept=0;
+    // Owner coalesces via an atomic pending bit. Every actual/manual change can
+    // call this; current-build authority maintenance must not call it.
     virtual void enqueueModelThreadRebuild(const std::string&)noexcept=0;
     // Queue-only request. Main owner coalesces it, verifies actual transport,
     // stops outside native Save, rebuilds while held, and never auto-resumes.

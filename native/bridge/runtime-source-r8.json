@@ -1,0 +1,63 @@
+{
+  "schema": "rysup.fl-ara-runtime-source-delta/1",
+  "candidate": "r8-cache-admission",
+  "prior_runtime_source_manifest": "runtime-source-r7.json",
+  "upstream_source_freeze_sha256": "c4c93af5db99e63f7d4dc90d419172dd95b27a3c880c653440a4c3edfea020e3",
+  "runtime_allowlist_sha256": "1279a00f3816496c12bbc689f592cbad9d6a2733cecfb23243fbb3b13fb3c74c",
+  "compile_manifest_sha256": "20c9ee19c868c121f9b2fb0e2c16a22be8d4c61d646713bc21721e0127ac47f4",
+  "compiled_artifact_verification_sha256": "8cab8d3b08b4da5ffacb3b97fe029987e04b16fa283644e6218795118864a56d",
+  "compiled_helper_original_sha256": "5644c93120de3acc23c2075aeb9d28067c063d72da48c51b5a13ea39a95a37b7",
+  "candidate_kind": "full-compiled-cache-queue-and-process-admission-unqualified",
+  "device_start_admission_compiled": true,
+  "strong_process_admission_compiled": true,
+  "authority_only_internal_cache_invalidation_compiled": true,
+  "actual_audio_io_qualified": false,
+  "runtime_qualified": false,
+  "sdk_source_imported": false,
+  "vendor_binary_or_audio_imported": false,
+  "private_qa_static_review_imported": false,
+  "files": [
+    {
+      "path": "native/bridge/native/FLAppBridge.mm",
+      "previous_sha256": "d2d097f7dab977baa08887e9cf4992508301f3a0f98876275e61b45531f589b3",
+      "sha256": "ed3fb01a8d51a30d1a3090f51deaf6b294c113678e014f4ad8da872d52b4cc82",
+      "bytes": 103564
+    },
+    {
+      "path": "native/bridge/native/FLVST3NativeHooks.cpp",
+      "previous_sha256": "05471a8f391a321aa580cc22427e080e3455c48385dfc18445c3d7dbabf73cf3",
+      "sha256": "23d5e4b4d09e076a937b42d800829901dd279ba52034e68cc1834ca61cc190d3",
+      "bytes": 53194
+    },
+    {
+      "path": "native/bridge/host/StandaloneARACoordinator.cpp",
+      "previous_sha256": "3e857c29cf9df3f5cb0de21466253a996dd87931cbbe0880ad425b2654a3c831",
+      "sha256": "eb952f22832e0d638a027983c7f0bf545813f25574f99f37caffa58ea192334e",
+      "bytes": 41110
+    },
+    {
+      "path": "native/bridge/native/FLNativeProcessAdmission.h",
+      "previous_sha256": null,
+      "sha256": "67db2de6477822b59286c98eb3cefa87e963c032ca2ab534d2e41b5d72b43fa5",
+      "bytes": 4685
+    },
+    {
+      "path": "native/bridge/native/FLVST3NativeHooks.h",
+      "previous_sha256": "2fb3236aabdf6ca34234f926764a859c886b3da410238a13415a8f47013c0106",
+      "sha256": "a7aa9257ccf4d4ae0a563ed33fc6c2ba2871dc6cdff7625072d35cdd5c73b667",
+      "bytes": 15989
+    },
+    {
+      "path": "native/bridge/host/StandaloneARACoordinator.h",
+      "previous_sha256": "2a56a39e2b967b1f826657a75e0dce803b98d229edc88f6380f775abeb2d7936",
+      "sha256": "124e35303c135f8964acd535c699c2425c449f8b9bde9220716db7932b5e0aba",
+      "bytes": 22258
+    },
+    {
+      "path": "native/bridge/host/StandaloneCacheInvalidation.h",
+      "previous_sha256": null,
+      "sha256": "0e4225b3d51bcc33e071d9ca4b09267c0aba6885bb74b5ddb0472c11430462a6",
+      "bytes": 1314
+    }
+  ]
+}

@@ -104,10 +104,20 @@ func verifyNativeBatchOutput(run: URL, runID: String, pid: Int32) throws -> [Str
     let resultURL = run.appendingPathComponent("headless-export-result.json")
     guard var result = try JSONSerialization.jsonObject(with: Data(contentsOf: resultURL)) as? [String: Any],
           result["run_id"] as? String == runID, result["pid"] as? Int32 == pid,
-          result["route"] as? String == "normal_native_cli", result["native_creation_returned"] as? Bool == true,
-          result["native_create_result"] as? Int == 0, let outputPath = result["output"] as? String else {
-        throw fail("The owned native batch did not return its matching observation receipt.")
+          result["route"] as? String == "normal_native_cli", result["requested"] as? Bool == true,
+          let outputPath = result["output"] as? String else {
+        throw fail("The owned native batch did not leave its matching observation receipt.")
     }
+    // The stock CLI may exit the process without returning CreateFruityInstance.
+    // Session already verified waitpid exit 0. Require our real loader-return
+    // preparation event as well; do not invent a native function-return proof.
+    let log = try String(contentsOf: run.appendingPathComponent("native-app.jsonl"), encoding: .utf8)
+    let primed = log.split(separator: "\n").contains { line in
+        guard let data = String(line).data(using: .utf8),
+              let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return event["event"] as? String == "native_batch_prime_ready" && event["run_id"] as? String == runID && event["pid"] as? Int32 == pid
+    }
+    guard primed else { throw fail("ARA preparation at the genuine native loader-return boundary was not confirmed.") }
     let output = URL(fileURLWithPath: outputPath)
     guard output.deletingLastPathComponent() == run.appendingPathComponent("export"), output.pathExtension == "wav" else { throw fail("Unexpected native batch output path.") }
     try rejectSymlinkAncestors(output)
@@ -128,6 +138,7 @@ func verifyNativeBatchOutput(run: URL, runID: String, pid: Int32) throws -> [Str
     guard AudioFileGetProperty(audio, kAudioFilePropertyAudioDataByteCount, &size, &bytes) == noErr,
           frames <= UInt64.max / 8, bytes == frames * 8 else { throw fail("Native batch WAVE extent is incomplete.") }
     result.merge(["state": "native_cli_output_verified", "completed": true, "output_verified": true,
+                  "completion_basis": "owned_process_exit_0_and_verified_output", "batch_primed_before_export": true,
                   "sample_rate": 48000, "channels": 2, "bits_per_sample": 32, "sample_format": "float",
                   "frames": frames, "output_sha256": try digest(output)]) { _, new in new }
     try jsonWrite(result, resultURL); return result

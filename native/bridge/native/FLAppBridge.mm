@@ -69,6 +69,7 @@ struct BridgeRecord {
     std::atomic<std::uint64_t> nativeStopRequestedEpoch{0};std::uint64_t actualNativeStopsVerified=0;bool initialWaitNoticeShown=false;
     NativeMixBoundary lastNativeMixBoundary,lifecycleBindingMixDiagnostic;bool modelMixBoundaryAvailable=false;
     bool disabled=false,boundary=false;std::atomic<bool> active{false},processing{false},observedInactive{false},observedStopped{false};
+    std::atomic<bool> nativeOfflineConfigured{false};
     std::atomic<bool> setupQualified{false};bool graphApplied=false,teardown=false,pendingPlainLoad=false,synchronousTerminating=false,teardownCallerVerified=false,actualNativeSaveMetadataCapture=false;
     std::atomic<std::uint64_t> nativeSetupDiagnosticCount{0};std::atomic<std::uint32_t> nativeSetupDiagnosticSlots{0};std::array<NativeSetupDiagnostic,32> nativeSetupHistory;
     std::atomic<double> sampleRate{0};std::string error,appliedGraph,appliedModel,lastNativeStateCaller;
@@ -154,6 +155,7 @@ struct Runtime {
     std::string nativeSaveError;
     std::vector<std::unique_ptr<BridgeRecord>> records;
     std::atomic<bool> overlayFault{false},overlayStaleHoldQueued{false};bool nativeStopNoticeQueued=false;
+    bool nativeBatchAfterPrimeReadOnly=false;
     bool hooksInstalled=false,overlayInstalled=false,inTick=false,anyBoundary=false,observeNativeDSP=false,nativeReadyStatusPublished=false;
     std::string error;std::uint64_t ticks=0;
     BridgeRecord* byID(const std::string& id)const noexcept{
@@ -963,6 +965,7 @@ struct NativeSetupObservation {
 void setup(hooks::InstanceRecord& n,const Steinberg::Vst::ProcessSetup& setup,Steinberg::tresult result,const hooks::ThreadInfo& info,void*)noexcept{
     auto* r=record(n);if(!r)return;
     NativeSetupObservation diagnostic(*r,setup,result,info);
+    if(result==kResultOk)r->nativeOfflineConfigured.store(setup.processMode==Steinberg::Vst::kOffline,std::memory_order_release);
     static_assert(Steinberg::Vst::kSample32==editor_setup_cache::nativeFloat32&&Steinberg::Vst::kRealtime==editor_setup_cache::nativeRealtime&&
         Steinberg::Vst::kPrefetch==editor_setup_cache::nativePrefetch&&Steinberg::Vst::kOffline==editor_setup_cache::nativeOffline,"native setup policy must match the actual SDK constants");
     // This record is bound only as EditorRenderer|EditorView. Full source PCM
@@ -1004,7 +1007,7 @@ void beforeTerminate(hooks::InstanceRecord& n,void*,const hooks::ThreadInfo& inf
     catch(...){fail(*r,"unknown native SDK lifecycle exception");}
 }
 void terminated(hooks::InstanceRecord& n,void*,Steinberg::tresult result,const hooks::ThreadInfo& info,void*)noexcept{
-    if(auto* r=record(n))try{retireNativeSlotPower(*r);runtime().coordinator->observeOriginalTerminateResult(r->identity.instanceID,result);r->alive=false;}catch(const std::exception& e){fail(*r,e.what());}
+    if(auto* r=record(n))try{r->nativeOfflineConfigured.store(false,std::memory_order_release);retireNativeSlotPower(*r);runtime().coordinator->observeOriginalTerminateResult(r->identity.instanceID,result);r->alive=false;}catch(const std::exception& e){fail(*r,e.what());}
     catch(...){fail(*r,"unknown native SDK lifecycle exception");}
 }
 void invalidateAssociatedARACache(BridgeRecord& r)noexcept{
@@ -1127,6 +1130,7 @@ bool status(){
         d[@"native_setup_history_overflow"]=@(setupCount>32?setupCount-32:0);d[@"native_setup_history_count_saturated"]=@(setupCount==std::numeric_limits<std::uint64_t>::max());d[@"native_setup_history_completed_only"]=@YES;
         d[@"native_set_active_calls"]=@(r->native->activationCalls.load());d[@"native_set_processing_calls"]=@(r->native->processingCalls.load());
         d[@"native_set_active_enabled"]=@(r->active.load());d[@"native_set_processing_enabled"]=@(r->processing.load());
+        d[@"native_offline_configured"]=@(r->nativeOfflineConfigured.load(std::memory_order_acquire));
         const auto* power=r->nativeSlotPower.load(std::memory_order_acquire);
         d[@"native_slot_power_binding_present"]=@(power!=nullptr);d[@"native_slot_power_registry_index"]=@(r->nativeSlotPowerRegistryIndex);
         d[@"native_slot_power_registered"]=@(r->nativeSlotPowerRegistered);d[@"native_slot_power_seed_attempted"]=@(r->nativeSlotPowerSeedAttempted);
@@ -1236,6 +1240,7 @@ bool status(){
     data[@"native_observed_state_dirty_requests_returned"]=@(rt.nativeObservedStateDirtyRequestsReturned);
     const auto sourceGlobalCounters=rt.overlay?rt.overlay->counters():lab::FLStandaloneOverlayCounters{};
     data[@"source_overlay_global_counters"]=@{@"qualified_preview_unrelated_callbacks":@(sourceGlobalCounters.qualifiedPreviewUnrelatedCallbacks)};
+    data[@"native_batch_after_prime_observation_only"]=@(rt.nativeBatchAfterPrimeReadOnly);
     data[@"source_overlay_installed"]=@(rt.overlayInstalled);data[@"inserts"]=inserts;data[@"error"]=@(rt.error.c_str());
     NSMutableArray* ownWindows=[NSMutableArray array];
     for(NSWindow* window in NSApp.windows){NSMutableDictionary* item=[NSMutableDictionary dictionary];
@@ -1308,11 +1313,12 @@ void drainNativeSlotPowerStop(BridgeRecord& r){
 bool primeAllCurrentARAForNativeBatch(void*)noexcept{
     auto& rt=runtime();
     const auto refuse=[&](const std::string& message)noexcept{
-        try{rt.error="Native CLI ARA preparation refused: "+message;status();
+        try{rt.nativeBatchAfterPrimeReadOnly=false;rt.error="Native CLI ARA preparation refused: "+message;status();
             writeNativeApplicationEvent("native_cli_ara_prime_failed",rt.error);}catch(...){}return false;
     };
     if(!pthread_main_np()||!nativeApplicationAdmitted())return refuse("owned main-thread admission unavailable");
     if(rt.inTick||currentNativeSaveTransaction()||rt.nativeSaveFreeze)return refuse("model or native Save operation already active");
+    rt.nativeBatchAfterPrimeReadOnly=false;
     rt.inTick=true;struct Reset{bool& value;~Reset(){value=false;}}reset{rt.inTick};
     const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
     std::string pending="current native source preparation is pending";
@@ -1348,6 +1354,10 @@ bool primeAllCurrentARAForNativeBatch(void*)noexcept{
                 if(!currentNativeCacheGenerationCoherent(*r))throw lab::SourceCacheNotReady("a changed current cache generation");
             }
             if(std::chrono::steady_clock::now()>=deadline)return refuse("preparation exceeded its deadline");
+            // The native batch now owns source reading through export/cleanup.
+            // Its nested timers observe only; they must not re-associate an
+            // unchanged source table while global native source readers run.
+            rt.nativeBatchAfterPrimeReadOnly=true;
             rt.error.clear();status();writeNativeApplicationEvent("native_cli_ara_prime_ready");return true;
         }catch(const lab::NativeModelBoundaryUnavailable& e){pending=e.what();}
         catch(const lab::SourceCacheNotReady& e){pending=e.what();}
@@ -1369,6 +1379,14 @@ void tick(const NativeApplication& app,void*)noexcept{
     auto& rt=runtime();if(rt.inTick)return;rt.inTick=true;
     struct Reset{bool& flag;~Reset(){flag=false;}} reset{rt.inTick};
     try{
+        bool currentNativeOffline=false;
+        for(const auto& r:rt.records)if(r->alive&&r->native&&r->native->nativeAlive&&!r->native->nativeTerminated
+            &&r->nativeOfflineConfigured.load(std::memory_order_acquire)){currentNativeOffline=true;break;}
+        if(rt.nativeBatchAfterPrimeReadOnly||currentNativeOffline){
+            if(++rt.ticks%10==0)status();
+            pollHeadlessNativeExport(false);
+            return;
+        }
         // Publish actual engine readiness before a source refresh or modal can
         // occupy the model thread. No graph/ARA qualification is inferred.
         if(!rt.nativeReadyStatusPublished&&app.admitted&&app.engineReady)rt.nativeReadyStatusPublished=status();
@@ -1510,6 +1528,7 @@ void onAdmitted(const NativeApplication& app,void*)noexcept{
     catch(...){runtime().error="Unknown exception installing native bridge";writeNativeApplicationEvent("ara_app_helper_install_failed",runtime().error);}
 }
 void onNativeCreationReturned(const NativeApplication&,int result,void*)noexcept{
+    runtime().nativeBatchAfterPrimeReadOnly=false;
     finishNativeBatchLoadBoundary();
     // Established normal engine return boundary, before OsxFL can exit. Own
     // source counters survive per-component teardown in the overlay controls.

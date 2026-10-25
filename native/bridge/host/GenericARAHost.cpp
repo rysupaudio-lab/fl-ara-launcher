@@ -557,7 +557,7 @@ void HostController::restoreArchiveOnlyImpl(const ArchiveSnapshot& state,const G
     if (!state.nativeGraphReady)
         demand(state.graph.sources.empty() && state.graph.tracks.empty() && state.graph.modifications.empty() && state.graph.regions.empty(),
                "unready archive must describe an actually empty document");
-    else p->prepare(currentGraph, resolve);
+    else p->prepare(currentGraph, resolve, requireInactive);
     // Backing strings remain owned by the caller's immutable relocation for
     // the whole synchronous restore; these arrays own all pointer storage.
     std::vector<ARA::ARAPersistentID> oldSources,newSources,oldMods,newMods;

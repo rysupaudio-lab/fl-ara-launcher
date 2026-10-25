@@ -37,7 +37,9 @@
       "sha256": "97fa5a8ff86eaf136d03a4e2867b55250e1103231ea5e2c207305959991ad6c8",
       "output_sha256": "97fa5a8ff86eaf136d03a4e2867b55250e1103231ea5e2c207305959991ad6c8",
       "transform": null,
-      "bytes": 58669
+      "bytes": 58669,
+      "post_consolidation_output_sha256": "0d905b53cdddf204e8edf85b46a7413fa0319f7a8ae0307343bd814473354f6d",
+      "post_consolidation_reason": "current native recall: preserve stopped-editor mode and ignore ended diagnostic owners for export readiness"
     },
     {
       "destination": "host/GenericARAHost.h",
@@ -135,7 +137,9 @@
       "sha256": "e807c51e8b55dfdb571a3d4e08d08370bfb88832a2e0ec6690ae8be6fec77d80",
       "output_sha256": "e807c51e8b55dfdb571a3d4e08d08370bfb88832a2e0ec6690ae8be6fec77d80",
       "transform": null,
-      "bytes": 138132
+      "bytes": 138132,
+      "post_consolidation_output_sha256": "5c0b342aaf50deade5c6698531639939da70b1e8b067093af6a8b9da72c77db9",
+      "post_consolidation_reason": "current native recall: preserve stopped-editor mode and ignore ended diagnostic owners for export readiness"
     },
     {
       "destination": "native/FLAppBridgeSaveGuardIntegrationTests.mm",

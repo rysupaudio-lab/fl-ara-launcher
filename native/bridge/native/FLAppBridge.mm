@@ -1430,9 +1430,12 @@ void tick(const NativeApplication& app,void*)noexcept{
             alert.informativeText=@(rt.nativeSaveError.c_str());[alert addButtonWithTitle:@"Keep session open"];
             status();if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];}
         if(++rt.ticks%10==0)status();
-        bool renderReady=!rt.records.empty()&&!rt.nativeSaveFreeze&&stopped();
-        for(const auto& owned:rt.records)if(!currentNativeCacheGenerationCoherent(*owned))renderReady=false;
-        pollHeadlessNativeExport(renderReady);
+        bool renderReady=!rt.nativeSaveFreeze&&stopped();std::size_t liveARAOwners=0;
+        for(const auto& owned:rt.records){
+            if(!owned->alive||!owned->native||!owned->native->nativeAlive||owned->native->nativeTerminated)continue;
+            ++liveARAOwners;if(!currentNativeCacheGenerationCoherent(*owned))renderReady=false;
+        }
+        pollHeadlessNativeExport(renderReady&&liveARAOwners>0);
 
     }catch(const std::exception& e){rt.error=e.what();writeNativeApplicationEvent("ara_app_bridge_tick_refused",e.what());status();}
     catch(...){rt.error="Unknown native SDK exception in app bridge";writeNativeApplicationEvent("ara_app_bridge_tick_refused",rt.error);}

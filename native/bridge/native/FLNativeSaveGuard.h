@@ -80,6 +80,9 @@ bool initialize(const NativeSaveGuardCallbacks&,const std::string& ownedRoot) no
 // Reads only this process's supplied fixture bytes using the production pin
 // validator. It does not replace actual loaded-image identity in production.
 bool instructionPinsMatch(std::uintptr_t) noexcept;
+// Own-memory byte fixtures run the unchanged production Unicode parser. Actual
+// production callers additionally require the sealed native Save frame first.
+bool decodeSaveUnicodePath(std::uintptr_t,std::string&) noexcept;
 bool setFrame(const NativeSaveRequest&) noexcept;
 void clearFrame() noexcept;
 int open(const char*,int,unsigned mode=0600) noexcept;

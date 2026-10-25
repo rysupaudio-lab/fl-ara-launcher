@@ -163,7 +163,10 @@ bool unicodePath(std::uintptr_t data,std::string& out){
     if(!readBytes(data-24,header.data(),24))return false;std::uint16_t page=0,width=0;std::int64_t length=0,refs=0;
     std::memcpy(&page,header.data(),2);std::memcpy(&width,header.data()+2,2);std::memcpy(&length,header.data()+16,8);
     std::memcpy(&refs,header.data()+8,8);
-    if(page!=1200||width!=2||length<=0||length>=PATH_MAX||refs< -1)return false;
+    // Exact sealed native Save-frame UnicodeString profile: C10 genuine Save
+    // captured dynamic codePage0/element2; immutable literals use1200/element2.
+    // Encoding remains UTF-16, with every other header/path/coherence check.
+    if((page!=0&&page!=1200)||width!=2||length<=0||length>=PATH_MAX||refs< -1)return false;
     std::vector<std::uint16_t> chars(std::size_t(length)+1);if(!readBytes(data,chars.data(),chars.size()*2)||chars.back()!=0)return false;
     out.clear();out.reserve(std::size_t(length));
     for(std::size_t i=0;i<std::size_t(length);++i){std::uint32_t c=chars[i];if(!c)return false;
@@ -355,6 +358,7 @@ case NativeSaveRejection::ReentrantPreflight:return "reentrant_save_preflight";c
 case NativeSaveRejection::UnsupportedSaveType:return "unsupported_native_save_type";}return "unknown";}
 #if defined(RYSUP_FL_SAVE_GUARD_TESTING)
 namespace save_guard_testing {
+bool decodeSaveUnicodePath(std::uintptr_t data,std::string& output)noexcept{try{return unicodePath(data,output);}catch(...){return false;}}
 bool instructionPinsMatch(std::uintptr_t base)noexcept{return base&&base<=UINTPTR_MAX-0xa63edc&&saveCodeSealed(base);}
 bool initialize(const NativeSaveGuardCallbacks& callbacks,const std::string& root)noexcept{try{auto& s=state();char path[PATH_MAX];struct stat st{};if(s.initialized||!pthread_main_np()||!realpath(root.c_str(),path)||root!=path||lstat(path,&st)||!S_ISDIR(st.st_mode)||st.st_uid!=getuid()||(st.st_mode&0022))return false;s.testing=true;s.testingRoot=root;s.callbacks=callbacks;s.pid=getpid();const bool ready=installMoveGuard();if(ready)s.liveCallbacks.store(&s.callbacks,std::memory_order_release);return ready;}catch(...){return false;}}
 bool setFrame(const NativeSaveRequest& r)noexcept{try{auto& s=state();if(!s.testing||!pthread_main_np()||!r.actualSaveFrame||r.targetPath.find(s.testingRoot+"/")!=0||r.actualOpenPath.find(s.testingRoot+"/")!=0)return false;s.synthetic=std::make_unique<NativeSaveRequest>(r);return true;}catch(...){return false;}}

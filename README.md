@@ -9,6 +9,17 @@ and packaging tools use Python and Xcode command-line tools on the build machine
 The app contains only the launcher, our native helper, documentation, and license;
 no Image-Line application files, third-party plugins, or license keys are shipped.
 
+## Install and open
+
+1. Open the DMG and drag **FL ARA Launcher** to Applications.
+2. Open **FL ARA Launcher**, then choose **Open a backed-up project…**.
+3. Choose your licensed FL application if it is installed somewhere else.
+4. Use the private FL window for ARA editing and project saves. Quit that FL window normally when finished; keep the launcher open until it reports completion.
+
+No Terminal commands or developer tools are needed. This candidate accepts the
+exact Apple Silicon FL Studio 26.1.7.5421 build; other FL versions are refused.
+The installer is being prepared for its final normal-app checks.
+
 ## Preservation contract
 
 - Verify the exact OsxFL and FLEngine SHA-256 pins and original Image-Line Team

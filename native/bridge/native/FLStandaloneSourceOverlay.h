@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+namespace rysup::fl_ara::slot_power { class Binding; }
+
 namespace rysup::ara_lab {
 struct FLStandaloneDecodedGraph;
 struct FLNativeModelSnapshot;
@@ -25,7 +27,8 @@ enum class FLStandaloneOverlayFault : std::uint8_t {
     OutputShape,SourcePosition,SourceRange,AmbiguousTarget,Count
 };
 enum class FLStandaloneOverlayOutcome : std::uint8_t {
-    Inactive,Unrelated,StaleTicket,Applied,NativeZeroRead,Rejected,HeldForRebuild
+    Inactive,Unrelated,StaleTicket,Applied,NativeZeroRead,Rejected,HeldForRebuild,
+    NativePowerDisabledOriginal,HeldForNativePower
 };
 struct FLStandaloneOverlayConfig {
     std::uintptr_t actualEngineImageBase=0;
@@ -44,6 +47,9 @@ struct FLStandaloneOverlayConfig {
     // stores true only; main drains takeStaleHoldsOnModelThread and performs a
     // verified real native STOP outside Save. No automatic resume is inferred.
     std::atomic<bool>* ownerStaleHoldQueued=nullptr;
+    // Normal application integration MUST force true. False is only the explicit
+    // legacy research/offline profile; there is no customer-visible bypass flag.
+    bool requireNativeSlotPower=false;
 };
 struct FLStandaloneOverlayInstallResult {
     bool installed=false;
@@ -149,6 +155,9 @@ struct FLStandaloneOverlayCounters {
     // GLOBAL router evidence only, never attributed to any insert. Saturating,
     // bounded best effort under contention; this is not audio qualification.
     std::uint64_t qualifiedPreviewUnrelatedCallbacks=0;
+    // Exact owning insert only. Never attributed globally or to another insert.
+    std::uint64_t nativePowerDisabledOriginalCallbacks=0,nativePowerDisabledOriginalFrames=0;
+    std::uint64_t nativePowerUnknownHeldCallbacks=0,nativePowerUnknownHeldFrames=0;
 };
 struct FLStandaloneOverlayInstanceStats {
     std::string instanceID;
@@ -157,6 +166,10 @@ struct FLStandaloneOverlayInstanceStats {
     std::size_t sources=0,regions=0;
     bool published=false,ticketAuthorized=false;
     bool staleHoldActive=false;
+    bool nativeSlotPowerRequired=false,nativeSlotPowerBindingPresent=false;
+    std::uintptr_t nativeSlotPowerWrapper=0,nativeSlotPowerActualComponent=0;
+    std::uint64_t nativeSlotPowerGeneration=0;
+    std::uint8_t nativeSlotPowerSnapshot=0; // slot_power::Power, status observation only.
     FLStandaloneOverlayCounters counters;
     std::array<FLStandalonePhysicalIdentityDiagnostic,kFLStandalonePhysicalIdentityDiagnosticSlots> physicalIdentityDiagnostics{};
     std::uint8_t physicalIdentityDiagnosticReadyMask=0;
@@ -171,10 +184,18 @@ struct FLStandaloneOverlayFaultRecord {
     std::uint8_t physicalIdentityDiagnosticReadyMask=0;
     bool physicalIdentityDiagnosticOverflow=false;
 };
+enum class FLStandaloneOverlayHoldReason : std::uint8_t {StaleCache=0,NativeSlotPowerUnknown=1};
 struct FLStandaloneOverlayStaleHoldRecord {
     std::string instanceID;
     std::uintptr_t actualNativeComponent=0;
     std::uint64_t captureSerial=0,ticketEpoch=0;
+    FLStandaloneOverlayHoldReason reason=FLStandaloneOverlayHoldReason::StaleCache;
+    // Power holds do not revoke/use cache authority: captureSerial/ticketEpoch0.
+    // Stable own Binding pointer, never a vendor pointer, never reset/freed.
+    const rysup::fl_ara::slot_power::Binding* nativeSlotPowerBinding=nullptr;
+    std::uintptr_t nativeSlotPowerWrapper=0;
+    std::uint64_t nativeSlotPowerGeneration=0;
+    bool nativeSlotPowerBindingMissing=false;
 };
 
 class FLStandaloneSourceOverlay {
@@ -194,6 +215,17 @@ public:
     // inference across another channel, insert or uncaptured region is made.
     void publish(const std::string& instanceID,const FLStandaloneDecodedGraph&,
                  std::shared_ptr<const FLNativeModelSnapshot>,StandaloneSourceCacheBatch);
+    // Own-pointer publication only, at actual stopped/drained native boundary.
+    // Root proves full reciprocal Wrapper/component/native chain and observes or
+    // seeds power independently. No vendor byte, SDK call or seed occurs here.
+    // Binding storage must live for the process. Same pointer is idempotent;
+    // replacement requires old closed + advancing generation, never cache dirty.
+    void associateNativeSlotPowerAtNativeBoundary(const std::string& instanceID,
+        std::uintptr_t actualNativeComponent,rysup::fl_ara::slot_power::Binding&);
+    // Main must call immediately before acting on a power-reason STOP request.
+    // Rechecks current own pointer/generation/Unknown only, no cache coherence,
+    // vendor reads, dirtying or rebuild. Completed Known/replaced events drop.
+    bool nativeSlotPowerHoldStillUnknownOnModelThread(const FLStandaloneOverlayStaleHoldRecord&)const;
     // Safe on notification/render threads: no allocation, lock, SDK or native
     // call. Closes all currently matching instance tickets before returning.
     void invalidateInstance(const std::string& instanceID)noexcept;

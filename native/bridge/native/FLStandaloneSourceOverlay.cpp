@@ -1,4 +1,5 @@
 #include "FLStandaloneSourceOverlay.h"
+#include "FLNativeSlotPowerControl.h"
 #include "../host/StandaloneARACoordinator.h"
 #include "../host/FLStandaloneGraphDecoder.h"
 #include <CommonCrypto/CommonDigest.h>
@@ -22,6 +23,7 @@
 #include <utility>
 
 namespace rysup::ara_lab {
+namespace native_power=::rysup::fl_ara::slot_power;
 namespace {
 constexpr std::uintptr_t voiceVMTOffset=0x1554a58,sourceReadOffset=0x7da970;
 constexpr std::uintptr_t sourceReadSlot=0x130,channelVMTOffset=0x1508640;
@@ -44,6 +46,8 @@ static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
 static_assert(std::atomic<std::uint8_t>::is_always_lock_free);
 static_assert(std::atomic<bool>::is_always_lock_free);
+static_assert(std::atomic<native_power::Binding*>::is_always_lock_free);
+static_assert(alignof(native_power::Binding)>1);
 static_assert(std::is_trivially_copyable<FLStandaloneSourceRead>::value);
 static_assert(std::is_trivially_copyable<FLStandalonePhysicalIdentityDiagnostic>::value);
 static_assert(kFLStandalonePhysicalIdentityDiagnosticSlots==4);
@@ -149,12 +153,21 @@ PointerChange replaceCOWDataPointer(std::uintptr_t location,std::uintptr_t expec
     out.changed=__atomic_compare_exchange_n(reinterpret_cast<std::uintptr_t*>(location),&expected,replacement,false,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST);
     out.protectionRestored=writable||mach_vm_protect(mach_task_self(),page,vm_page_size,false,info.protection)==KERN_SUCCESS;return out;
 }
+void addBoundedSaturating(std::atomic<std::uint64_t>& counter,std::uint64_t delta)noexcept{
+    if(!delta)return;auto value=counter.load(std::memory_order_relaxed);
+    for(unsigned attempt=0;attempt<4;++attempt){const auto maximum=std::numeric_limits<std::uint64_t>::max();if(value==maximum)return;
+        const auto next=delta>maximum-value?maximum:value+delta;
+        if(counter.compare_exchange_strong(value,next,std::memory_order_relaxed,std::memory_order_relaxed))return;}
+}
 struct AtomicCounters{
     std::atomic<std::uint64_t> calls{0},unrelated{0},stale{0},applied{0},frames{0},zero{0},rejected{0},bits{0};
     std::atomic<std::uint64_t> held{0},heldFrames{0},holdRequests{0};
+    std::atomic<std::uint64_t> powerDisabledOriginal{0},powerDisabledFrames{0},powerUnknownHeld{0},powerUnknownFrames{0};
     FLStandaloneOverlayCounters snapshot(std::uint32_t readers=0)const noexcept{
         FLStandaloneOverlayCounters result{calls.load(),unrelated.load(),stale.load(),applied.load(),frames.load(),zero.load(),rejected.load(),bits.load(),readers};
-        result.heldCallbacks=held.load();result.heldFrames=heldFrames.load();result.staleHoldRequests=holdRequests.load();return result;
+        result.heldCallbacks=held.load();result.heldFrames=heldFrames.load();result.staleHoldRequests=holdRequests.load();
+        result.nativePowerDisabledOriginalCallbacks=powerDisabledOriginal.load();result.nativePowerDisabledOriginalFrames=powerDisabledFrames.load();
+        result.nativePowerUnknownHeldCallbacks=powerUnknownHeld.load();result.nativePowerUnknownHeldFrames=powerUnknownFrames.load();return result;
     }
 };
 struct HookPublication{
@@ -198,6 +211,10 @@ struct FLStandaloneSourceOverlay::Impl{
         std::string id;std::uintptr_t component=0;AtomicCounters counters;
         std::atomic<std::uint64_t> pendingBits{0},faultCaptureSerial{0};
         std::atomic<std::uint8_t> firstFault{0};
+        std::atomic<native_power::Binding*> nativeSlotPowerBinding{nullptr};
+        // One atomic identity, no mixed tuple. 0 empty,1 required missing,
+        // otherwise stable own Binding address. Never a vendor pointer.
+        std::atomic<std::uintptr_t> powerHoldPendingIdentity{0};
         std::array<PhysicalDiagnosticSlot,kFLStandalonePhysicalIdentityDiagnosticSlots> physicalDiagnostics;
         std::atomic<bool> physicalDiagnosticOverflow{false};
         std::atomic<bool> holdDelivery{false};
@@ -229,6 +246,12 @@ struct FLStandaloneSourceOverlay::Impl{
     FLStandaloneOverlayConfig config;std::thread::id modelThread=std::this_thread::get_id();
     std::map<std::string,std::shared_ptr<const Batch>> live;
     std::map<std::string,std::shared_ptr<Control>> controls;
+    struct NativePowerAssociation{std::uintptr_t component=0;native_power::Binding* binding=nullptr;};
+    std::map<std::string,NativePowerAssociation> nativePowerAssociations;
+#ifdef FL_STANDALONE_SOURCE_OVERLAY_OFFLINE_TEST_MAIN
+    void(*afterPowerSnapshotForTest)(native_power::Power,void*)noexcept=nullptr;
+    void* afterPowerSnapshotContextForTest=nullptr;
+#endif
     std::unique_ptr<Table> current;std::vector<std::unique_ptr<Table>> retired;
     std::atomic<Table*> table{nullptr};std::atomic<std::uint32_t> readers{0};AtomicCounters totals;
     std::atomic<std::uint64_t> qualifiedPreviewUnrelatedCallbacks{0};
@@ -281,7 +304,12 @@ struct FLStandaloneSourceOverlay::Impl{
         if(control!=controls.end()){
             demand(control->second->component==decoded.actualAssociation.actualComponent&&!control->second->pendingBits.load(),
                 "standalone source instance owner changed or fault is unacknowledged");next->control=control->second;
-        }else{next->control=std::make_shared<Control>();next->control->id=id;next->control->component=decoded.actualAssociation.actualComponent;}
+        }else{next->control=std::make_shared<Control>();next->control->id=id;next->control->component=decoded.actualAssociation.actualComponent;
+            const auto power=nativePowerAssociations.find(id);if(power!=nativePowerAssociations.end()){
+                demand(power->second.component==next->control->component&&power->second.binding&&power->second.binding->actualComponent==next->control->component,
+                    "standalone native slot-power association belongs to a different actual component");
+                next->control->nativeSlotPowerBinding.store(power->second.binding,std::memory_order_release);}}
+
         std::map<std::string,const WholeModificationSourceCache*> cacheMap;
         for(const auto& cache:next->cache.modifications)demand(cacheMap.emplace(cache.modificationID,&cache).second,"standalone source duplicate modification cache");
         std::map<std::string,std::size_t> sourceMap;std::size_t pcmBytes=0,cacheBytes=0;
@@ -491,6 +519,37 @@ struct FLStandaloneSourceOverlay::Impl{
         }
         return FLStandaloneOverlayOutcome::HeldForRebuild;
     }
+    static native_power::Power snapshotNativePower(const Control& control,const native_power::Binding* binding,bool required)noexcept{
+        if(!binding)return required?native_power::Power::Unknown:native_power::Power::Enabled;
+        if(!binding->wrapper||!binding->generation||binding->actualComponent!=control.component)return native_power::Power::Unknown;
+        return binding->snapshotForBlock();
+    }
+    FLStandaloneOverlayOutcome holdForUnknownNativePower(const Batch& batch,const FLStandaloneSourceRead& read,const native_power::Binding* observedBinding)noexcept{
+        // Exact target/shape/span proof already passed. This is NOT a cache edit:
+        // do not invalidate/authorize its ticket, dirty it, or use stale episode.
+        auto& control=*batch.control;totals.held.fetch_add(1);control.counters.held.fetch_add(1);
+        addBoundedSaturating(control.counters.powerUnknownHeld,1);
+        if(read.originalReadFrames>0){for(std::int32_t i=0;i<read.originalReadFrames;++i){read.nativeInterleavedStereo[i*2]=0;read.nativeInterleavedStereo[i*2+1]=0;}
+            const auto frames=static_cast<std::uint64_t>(read.originalReadFrames);totals.heldFrames.fetch_add(frames);control.counters.heldFrames.fetch_add(frames);
+            addBoundedSaturating(control.counters.powerUnknownFrames,frames);}
+        const auto identity=observedBinding?reinterpret_cast<std::uintptr_t>(observedBinding):std::uintptr_t(1);
+        auto pending=control.powerHoldPendingIdentity.load(std::memory_order_relaxed);
+        for(unsigned attempt=0;attempt<4;++attempt){
+            if(control.nativeSlotPowerBinding.load(std::memory_order_acquire)!=observedBinding)break;
+            if(pending==identity||control.powerHoldPendingIdentity.compare_exchange_strong(pending,identity,std::memory_order_release,std::memory_order_relaxed)){
+                config.ownerStaleHoldQueued->store(true,std::memory_order_release);break;}}
+        return FLStandaloneOverlayOutcome::HeldForNativePower;
+    }
+    bool powerHoldStillUnknown(const FLStandaloneOverlayStaleHoldRecord& request)const noexcept{
+        if(request.reason!=FLStandaloneOverlayHoldReason::NativeSlotPowerUnknown)return false;
+        const auto current=live.find(request.instanceID);if(current==live.end())return false;const auto& control=*current->second->control;
+        if(control.component!=request.actualNativeComponent)return false;
+        const auto* binding=control.nativeSlotPowerBinding.load(std::memory_order_acquire);
+        if(binding!=request.nativeSlotPowerBinding)return false;
+        if(binding&&(binding->generation!=request.nativeSlotPowerGeneration||binding->wrapper!=request.nativeSlotPowerWrapper))return false;
+        if(!binding&&(!request.nativeSlotPowerBindingMissing||!config.requireNativeSlotPower))return false;
+        return snapshotNativePower(control,binding,config.requireNativeSlotPower)==native_power::Power::Unknown;
+    }
     void noteQualifiedPreviewUnrelated()noexcept{
         // Global observation only. Four bounded CAS attempts, saturate rather
         // than wrap. Contention can under-count; never authorizes a source/read.
@@ -549,13 +608,23 @@ struct FLStandaloneSourceOverlay::Impl{
             r.originalReadFrames<0||r.originalReadFrames>r.nativeBlockFrames)return deny(FLStandaloneOverlayFault::OutputShape);
         if(!std::isfinite(r.sourceStartFrame)||r.sourceStartFrame<0||std::floor(r.sourceStartFrame)!=r.sourceStartFrame)
             return deny(FLStandaloneOverlayFault::SourcePosition);
-        if(!r.originalReadFrames){if(r.sourceStartFrame>double(s.frames)&&r.originalEnded!=1)return deny(FLStandaloneOverlayFault::SourcePosition);
-            if(!b->cache.gate->authorizes(b->cache.ticket)){
-                totals.zero.fetch_add(1);b->control->counters.zero.fetch_add(1);return holdForCoherentRebuild(*b,r);}
-            totals.zero.fetch_add(1);b->control->counters.zero.fetch_add(1);return FLStandaloneOverlayOutcome::NativeZeroRead;}
-        if(r.sourceStartFrame>double(s.frames))return deny(FLStandaloneOverlayFault::SourcePosition);
-        const auto start=std::uint64_t(r.sourceStartFrame),frames=std::uint64_t(r.originalReadFrames);
-        if(frames>std::uint64_t(s.frames)-start)return deny(FLStandaloneOverlayFault::SourceRange);
+        std::uint64_t start=0,frames=static_cast<std::uint64_t>(r.originalReadFrames);
+        if(!r.originalReadFrames){if(r.sourceStartFrame>double(s.frames)&&r.originalEnded!=1)return deny(FLStandaloneOverlayFault::SourcePosition);}
+        else{if(r.sourceStartFrame>double(s.frames))return deny(FLStandaloneOverlayFault::SourcePosition);
+            start=std::uint64_t(r.sourceStartFrame);if(frames>std::uint64_t(s.frames)-start)return deny(FLStandaloneOverlayFault::SourceRange);}
+        // One own-atomic power snapshot for this proven source block. No vendor
+        // object/tag read, no mid-copy power re-read, no guessed dry fallback.
+        const auto* powerBinding=b->control->nativeSlotPowerBinding.load(std::memory_order_acquire);
+        const auto power=snapshotNativePower(*b->control,powerBinding,config.requireNativeSlotPower);
+#ifdef FL_STANDALONE_SOURCE_OVERLAY_OFFLINE_TEST_MAIN
+        if(afterPowerSnapshotForTest)afterPowerSnapshotForTest(power,afterPowerSnapshotContextForTest);
+#endif
+        if(!r.originalReadFrames){totals.zero.fetch_add(1);b->control->counters.zero.fetch_add(1);}
+        if(power==native_power::Power::Disabled){addBoundedSaturating(b->control->counters.powerDisabledOriginal,1);
+            addBoundedSaturating(b->control->counters.powerDisabledFrames,frames);return FLStandaloneOverlayOutcome::NativePowerDisabledOriginal;}
+        if(power!=native_power::Power::Enabled)return holdForUnknownNativePower(*b,r,powerBinding);
+        if(!r.originalReadFrames){if(!b->cache.gate->authorizes(b->cache.ticket))return holdForCoherentRebuild(*b,r);
+            return FLStandaloneOverlayOutcome::NativeZeroRead;}
         // Recheck immediately before the first write. Once a notification has
         // closed the gate, a later proven read holds instead of forwarding dry.
         if(!b->cache.gate->authorizes(b->cache.ticket))return holdForCoherentRebuild(*b,r);
@@ -605,6 +674,22 @@ void FLStandaloneSourceOverlay::publish(const std::string& id,const FLStandalone
     next->control->holdEpisodeGeneration=0;next->control->holdDelivery=false;
     p->controls[id]=next->control;p->live=std::move(instances);p->replaceTable(std::move(table));
 }
+void FLStandaloneSourceOverlay::associateNativeSlotPowerAtNativeBoundary(const std::string& id,std::uintptr_t actualComponent,native_power::Binding& binding){
+    p->requireBoundary();demand(!id.empty()&&id.size()<=512&&actualComponent&&binding.actualComponent==actualComponent&&binding.wrapper&&binding.generation,
+        "native slot-power binding lacks exact immutable actual component identity");
+    const auto control=p->controls.find(id);if(control!=p->controls.end())demand(control->second->component==actualComponent,"native slot-power binding cannot transfer another insert's ownership");
+    const auto previous=p->nativePowerAssociations.find(id);
+    if(previous!=p->nativePowerAssociations.end()){
+        demand(previous->second.component==actualComponent,"native slot-power association component changed");
+        if(previous->second.binding!=&binding)demand(previous->second.binding&&previous->second.binding->closed()&&binding.generation>previous->second.binding->generation,
+            "native slot-power replacement requires permanently closed old binding and advancing generation");
+    }
+    p->nativePowerAssociations[id]={actualComponent,&binding};
+    if(control!=p->controls.end())control->second->nativeSlotPowerBinding.store(&binding,std::memory_order_release);
+}
+bool FLStandaloneSourceOverlay::nativeSlotPowerHoldStillUnknownOnModelThread(const FLStandaloneOverlayStaleHoldRecord& request)const{
+    p->requireMain();return p->powerHoldStillUnknown(request);
+}
 void FLStandaloneSourceOverlay::invalidateInstance(const std::string& id)noexcept{
     ReaderGuard guard(p->readers);const auto* table=p->table.load(std::memory_order_seq_cst);if(!table)return;
     for(const auto& batch:table->batches)if(batch->control->id==id)batch->cache.gate->invalidate();
@@ -634,7 +719,10 @@ FLStandaloneOverlayCounters FLStandaloneSourceOverlay::counters()const noexcept{
 std::vector<FLStandaloneOverlayInstanceStats> FLStandaloneSourceOverlay::instanceStatsOnModelThread()const{
     p->requireMain();std::vector<FLStandaloneOverlayInstanceStats> rows;rows.reserve(p->controls.size());
     for(const auto& pair:p->controls){FLStandaloneOverlayInstanceStats row;row.instanceID=pair.first;row.counters=pair.second->counters.snapshot();
-        Impl::copyPhysicalIdentityDiagnostics(*pair.second,row);
+        Impl::copyPhysicalIdentityDiagnostics(*pair.second,row);row.nativeSlotPowerRequired=p->config.requireNativeSlotPower;
+        const auto* power=pair.second->nativeSlotPowerBinding.load(std::memory_order_acquire);row.nativeSlotPowerBindingPresent=power!=nullptr;
+        if(power){row.nativeSlotPowerWrapper=power->wrapper;row.nativeSlotPowerActualComponent=power->actualComponent;row.nativeSlotPowerGeneration=power->generation;}
+        row.nativeSlotPowerSnapshot=static_cast<std::uint8_t>(Impl::snapshotNativePower(*pair.second,power,p->config.requireNativeSlotPower));
         const auto found=p->live.find(pair.first);if(found!=p->live.end()){const auto& batch=*found->second;row.nativeMixerInsert=batch.mixer;row.captureSerial=batch.cache.captureSerial;
             row.ticketEpoch=batch.cache.ticket.epoch;row.sources=batch.sources.size();row.regions=batch.regions.size();row.published=true;row.ticketAuthorized=batch.cache.gate->authorizes(batch.cache.ticket);
             row.staleHoldActive=batch.control->holdEpisodeGeneration.load()==batch.publicationGeneration;}rows.push_back(std::move(row));}return rows;
@@ -651,10 +739,21 @@ std::vector<FLStandaloneOverlayFaultRecord> FLStandaloneSourceOverlay::takeFault
 }
 std::vector<FLStandaloneOverlayStaleHoldRecord> FLStandaloneSourceOverlay::takeStaleHoldsOnModelThread(){
     p->requireMain();std::vector<FLStandaloneOverlayStaleHoldRecord> out;
-    for(const auto& pair:p->controls){auto& c=*pair.second;if(!c.holdDelivery.exchange(false,std::memory_order_acq_rel))continue;
-        const auto current=p->live.find(pair.first);if(current==p->live.end())continue;const auto& batch=*current->second;
-        if(c.holdEpisodeGeneration.load()==batch.publicationGeneration&&!batch.cache.gate->authorizes(batch.cache.ticket))
-            out.push_back({pair.first,c.component,batch.cache.captureSerial,batch.cache.ticket.epoch});}
+    for(const auto& pair:p->controls){auto& c=*pair.second;
+        if(c.holdDelivery.exchange(false,std::memory_order_acq_rel)){
+            const auto current=p->live.find(pair.first);if(current!=p->live.end()){const auto& batch=*current->second;
+                if(c.holdEpisodeGeneration.load()==batch.publicationGeneration&&!batch.cache.gate->authorizes(batch.cache.ticket))
+                    out.push_back({pair.first,c.component,batch.cache.captureSerial,batch.cache.ticket.epoch});}}
+        const auto pending=c.powerHoldPendingIdentity.exchange(0,std::memory_order_acq_rel);if(!pending)continue;
+        FLStandaloneOverlayStaleHoldRecord request;request.instanceID=pair.first;request.actualNativeComponent=c.component;
+        request.reason=FLStandaloneOverlayHoldReason::NativeSlotPowerUnknown;request.nativeSlotPowerBindingMissing=pending==1;
+        request.nativeSlotPowerBinding=pending==1?nullptr:reinterpret_cast<const native_power::Binding*>(pending);
+        // Compare before dereferencing the pending address: only a currently
+        // published process-lifetime own Binding may supply immutable metadata.
+        if(c.nativeSlotPowerBinding.load(std::memory_order_acquire)!=request.nativeSlotPowerBinding)continue;
+        if(request.nativeSlotPowerBinding){request.nativeSlotPowerWrapper=request.nativeSlotPowerBinding->wrapper;request.nativeSlotPowerGeneration=request.nativeSlotPowerBinding->generation;}
+        if(p->powerHoldStillUnknown(request))out.push_back(std::move(request));
+    }
     return out;
 }
 void FLStandaloneSourceOverlay::shutdownAtNativeBoundary(){
@@ -767,8 +866,8 @@ constexpr float marker=.625f;
 struct SyntheticOwner{std::atomic<bool> admitted{true},held{true},fault{false},staleHold{false};std::atomic<unsigned> holdChecks{0};};
 bool syntheticAdmission(void* raw)noexcept{return static_cast<SyntheticOwner*>(raw)->admitted.load();}
 bool syntheticHold(void* raw)noexcept{auto& owner=*static_cast<SyntheticOwner*>(raw);owner.holdChecks.fetch_add(1);return owner.held.load();}
-FLStandaloneOverlayConfig syntheticConfig(SyntheticOwner& owner){return {syntheticBase,"/SYNTHETIC/no-native-image-loaded",
-    kFLStandaloneOverlayEngineArm64SHA256,syntheticAdmission,syntheticHold,&owner,&owner.fault,&owner.staleHold};}
+FLStandaloneOverlayConfig syntheticConfig(SyntheticOwner& owner,bool requirePower=false){return {syntheticBase,"/SYNTHETIC/no-native-image-loaded",
+    kFLStandaloneOverlayEngineArm64SHA256,syntheticAdmission,syntheticHold,&owner,&owner.fault,&owner.staleHold,requirePower};}
 template<class T>void putSynthetic(Record& bytes,std::size_t offset,T value){std::memcpy(bytes.data()+offset,&value,sizeof(value));}
 void updateSynthetic(FLNativeClipSnapshot& clip){
     putSynthetic(clip.record,0,clip.timelineStartTicks00);putSynthetic(clip.record,4,clip.packedTypeAndChannel04);
@@ -851,12 +950,12 @@ FLStandaloneSourceRead syntheticRead(const FLNativeModelSnapshot& model,int clip
     r.readerStride48=sample.nativeFormatByte78;r.nativeBlockFrames=6;r.originalReadFrames=3;r.nativeInterleavedStereo=output;r.outputMatchesActualNativeContext=true;return r;
 }
 struct OfflineFixture{
-    SyntheticOwner owner;FLStandaloneSourceOverlay router{syntheticConfig(owner)};
+    SyntheticOwner owner;FLStandaloneSourceOverlay router;
     std::shared_ptr<FLNativeModelSnapshot> model=syntheticModel();
     FLStandaloneDecodedGraph mono=syntheticDecoded(*model,1),stereo=syntheticDecoded(*model,2);
     std::shared_ptr<StandaloneCacheGate> monoGate=std::make_shared<StandaloneCacheGate>(),stereoGate=std::make_shared<StandaloneCacheGate>();
     std::array<float,14> output{};
-    OfflineFixture(){output.fill(marker);router.publish("mono",mono,model,syntheticBatch("mono",mono,monoGate));}
+    explicit OfflineFixture(bool requirePower=false):router(syntheticConfig(owner,requirePower)){output.fill(marker);router.publish("mono",mono,model,syntheticBatch("mono",mono,monoGate));}
     ~OfflineFixture(){router.shutdownAtNativeBoundary();}
     FLStandaloneSourceRead read(int id=1){return syntheticRead(*model,id,output.data()+1);}
 };
@@ -977,6 +1076,74 @@ void staleHoldControls(){
         f.output.fill(marker);demand(rtRead(f.router,f.read())==FLStandaloneOverlayOutcome::Applied,"retired hold changed the actual current ticket");
         pass("retired in-flight batch may hold its own span but cannot re-arm STOP or stale status for a newer coherent publication");
     }
+}
+void nativeSlotPowerControls(){
+    using Outcome=FLStandaloneOverlayOutcome;
+    {
+        native_power::Binding binding(0xb10000,0x700001,1);OfflineFixture f(true);
+        const auto ticket=f.monoGate->currentTicket();auto read=f.read();read.originalEnded=1;read.originalChanged=1;
+        demand(rtRead(f.router,read)==Outcome::HeldForNativePower&&f.monoGate->authorizes(ticket)&&!f.owner.fault,
+            "missing mandatory binding dirtied cache or passed source audio");
+        auto holds=f.router.takeStaleHoldsOnModelThread();demand(holds.size()==1&&holds[0].reason==FLStandaloneOverlayHoldReason::NativeSlotPowerUnknown
+            &&holds[0].nativeSlotPowerBindingMissing&&!holds[0].captureSerial&&!holds[0].ticketEpoch
+            &&f.router.nativeSlotPowerHoldStillUnknownOnModelThread(holds[0]),"missing binding hold acquired cache authority or lost power identity");
+        demand(f.output[0]==marker&&f.output[13]==marker&&read.originalReadFrames==3&&read.originalEnded==1&&read.originalChanged==1,
+            "power hold changed native flags/count or guards");
+        f.router.associateNativeSlotPowerAtNativeBoundary("mono",binding.actualComponent,binding);
+        demand(!f.router.nativeSlotPowerHoldStillUnknownOnModelThread(holds[0]),"associated binding did not cancel obsolete missing-owner STOP");
+        f.output.fill(marker);demand(rtRead(f.router,f.read())==Outcome::HeldForNativePower,"initial Unknown binding passed source audio");
+        holds=f.router.takeStaleHoldsOnModelThread();demand(holds.size()==1&&holds[0].nativeSlotPowerBinding==&binding
+            &&f.router.nativeSlotPowerHoldStillUnknownOnModelThread(holds[0]),"Unknown binding hold lost immutable pointer/generation");
+        auto notification=binding.beforeOriginal(1);notification.originalReturned();
+        demand(!f.router.nativeSlotPowerHoldStillUnknownOnModelThread(holds[0])&&f.monoGate->authorizes(ticket),
+            "completed native notification still requested STOP or changed cache authority");
+        f.output.fill(marker);demand(rtRead(f.router,f.read())==Outcome::Applied,"Enabled native slot did not apply edited PCM");
+        pass("mandatory missing/Unknown power holds exact source span without changing cache tickets; binding and Known notifications cancel obsolete STOP requests");
+    }
+    {
+        native_power::Binding binding(0xb10000,0x700001,1);OfflineFixture f(true);
+        f.router.associateNativeSlotPowerAtNativeBoundary("mono",binding.actualComponent,binding);
+        auto off=binding.beforeOriginal(0);off.originalReturned();f.monoGate->invalidate();const auto stale=f.monoGate->currentTicket();
+        auto read=f.read();read.originalEnded=1;read.originalChanged=1;const auto original=f.output;
+        demand(rtRead(f.router,read)==Outcome::NativePowerDisabledOriginal&&f.output==original
+            &&read.originalReadFrames==3&&read.originalEnded==1&&read.originalChanged==1&&!f.owner.staleHold
+            &&f.router.takeStaleHoldsOnModelThread().empty()&&f.monoGate->currentTicket().epoch==stale.epoch,
+            "Disabled slot overwrote original PCM/flags or made stale-cache work");
+        read.originalReadFrames=0;read.sourceStartFrame=std::ldexp(1.0,64);
+        demand(rtRead(f.router,read)==Outcome::NativePowerDisabledOriginal&&f.output==original,"Disabled native EOF tail changed");
+        const auto stats=f.router.instanceStatsOnModelThread();demand(stats[0].counters.nativePowerDisabledOriginalCallbacks==2
+            &&stats[0].counters.nativePowerDisabledOriginalFrames==3&&!stats[0].counters.appliedFrames,
+            "Disabled source counters gained edited PCM credit");
+        auto on=binding.beforeOriginal(1);on.originalReturned();f.output.fill(marker);
+        demand(rtRead(f.router,f.read())==Outcome::HeldForRebuild&&f.owner.staleHold,"Enabled slot bypassed stale edited-cache ticket");
+        pass("native Disabled bypass preserves original bytes/count/flags even with stale cache; Enabled retains existing cache guards");
+    }
+    {
+        native_power::Binding old(0xb10000,0x700001,1),replacement(0xb10000,0x700001,2);OfflineFixture f(true);
+        f.router.associateNativeSlotPowerAtNativeBoundary("mono",old.actualComponent,old);
+        rtRead(f.router,f.read());bool refused=false;
+        try{f.router.associateNativeSlotPowerAtNativeBoundary("mono",replacement.actualComponent,replacement);}catch(const std::exception&){refused=true;}
+        demand(refused,"live power binding could be replaced/reused");old.closePermanently();
+        f.router.associateNativeSlotPowerAtNativeBoundary("mono",replacement.actualComponent,replacement);
+        demand(f.router.takeStaleHoldsOnModelThread().empty(),"retired binding queued STOP for its replacement generation");
+        auto on=replacement.beforeOriginal(1);on.originalReturned();f.output.fill(marker);
+        demand(rtRead(f.router,f.read())==Outcome::Applied,"replacement Known generation did not render");
+        auto pending=replacement.beforeOriginal(0);f.output.fill(marker);
+        demand(rtRead(f.router,f.read())==Outcome::HeldForNativePower,"in-flight notification was mistaken for Known power");
+        pending.originalReturned();demand(f.router.takeStaleHoldsOnModelThread().empty(),"completed OFF notification caused stale pending STOP");
+        replacement.closePermanently();f.output.fill(marker);
+        demand(rtRead(f.router,f.read())==Outcome::HeldForNativePower,"permanently retired binding reused its last Known value");
+        pass("reused Wrapper requires closed old binding and advancing generation; retired or completed events cannot STOP the current Known owner");
+    }
+    {
+        native_power::Binding binding(0xb10000,0x700001,1);OfflineFixture f(true);
+        f.router.associateNativeSlotPowerAtNativeBoundary("mono",binding.actualComponent,binding);
+        auto on=binding.beforeOriginal(1);on.originalReturned();auto bad=f.read();bad.readerPCM40+=8;const auto original=f.output;
+        demand(rtRead(f.router,bad)==Outcome::Rejected&&f.output==original&&f.owner.fault,
+            "native power state bypassed physical source proof");
+        pass("power observation follows complete target/physical/span validation and cannot admit an invalid source");
+    }
+    demand(overlayOfflineRTAllocations.load()==0,"native slot-power source path allocated on RT");
 }
 void negativeControls(){using F=FLStandaloneOverlayFault;
     negativeRead("targeted event mutation closes matching gate and queues fixed owner fault",[](auto& r){r.nativeRecord[0]^=1;},F::RecordIdentity);
@@ -1355,7 +1522,7 @@ void disabledTeardownControls(){
     }
 }
 int sourceOverlayOfflineMain(){
-    positiveControls();zeroControls();staleHoldControls();negativeControls();publicationControls();observedChannelClassControls();physicalDiagnosticBranchControls();fixedPhysicalDiagnosticControls();concurrentPhysicalDiagnosticControls();retiredPhysicalDiagnosticControls();defaultPreviewOwnerControls();forwardingControl();concurrentLifecycleControl();disabledTeardownControls();
+    positiveControls();zeroControls();staleHoldControls();nativeSlotPowerControls();negativeControls();publicationControls();observedChannelClassControls();physicalDiagnosticBranchControls();fixedPhysicalDiagnosticControls();concurrentPhysicalDiagnosticControls();retiredPhysicalDiagnosticControls();defaultPreviewOwnerControls();forwardingControl();concurrentLifecycleControl();disabledTeardownControls();
     std::cout<<"{\"schema\":\"rysup.standalone-fl.source-overlay-offline/1\",\"pass\":true,\"checks\":"<<passed.size()
         <<",\"synthetic_inputs\":true,\"native_engine_loaded\":false,\"native_hook_installed\":false,\"third_party_runtime_qualified\":false,\"rt_allocations\":"<<overlayOfflineRTAllocations.load()<<",\"controls\":[";
     for(std::size_t i=0;i<passed.size();++i){if(i)std::cout<<',';std::cout<<'"'<<passed[i]<<'"';}std::cout<<"]}\n";return 0;

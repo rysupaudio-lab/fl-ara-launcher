@@ -6,6 +6,7 @@
 #include "FLNativeProcessObserver.h"
 #include "FLNativeMixBoundary.h"
 #include "FLNativeEditorSetupCachePolicy.h"
+#include "FLNativeSlotPowerObserver.h"
 #include "FLNativeSaveGuard.h"
 #include "RegistrationReadThrough.h"
 #include "../host/FLStandaloneGraphDecoder.h"
@@ -14,6 +15,10 @@
 #import <AppKit/AppKit.h>
 #include <Security/Security.h>
 #include <dlfcn.h>
+#include <mach-o/dyld.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <cstdlib>
 #include <pthread.h>
 #include <unistd.h>
 #include <algorithm>
@@ -63,6 +68,11 @@ struct BridgeRecord {
     std::shared_ptr<const lab::FLNativeModelSnapshot> copied;
     std::shared_ptr<lab::StandaloneCacheGate> nativeCacheGate;
     std::unique_ptr<process_observer::NativeProcessObserver> nativeProcessObserver;
+    std::atomic<slot_power::Binding*> nativeSlotPower{nullptr};
+    std::uint32_t nativeSlotPowerRegistryIndex=std::numeric_limits<std::uint32_t>::max();
+    bool nativeSlotPowerRegistered=false,nativeSlotPowerSeedAttempted=false,nativeSlotPowerKnownOnce=false,nativeSlotPowerSourcePublished=false;
+    std::uint64_t nativeSlotPowerSeedSuccesses=0,nativeSlotPowerSeedRefusals=0,nativeSlotPowerSeedSkippedNotifications=0,nativeSlotPowerStopsVerified=0;
+    std::optional<lab::FLStandaloneOverlayStaleHoldRecord> nativeSlotPowerStopPending;
     bool staticSignatureChecked=false,staticSignatureValid=false;
     std::int32_t staticSignatureStatus=0;
     std::string pluginBundlePath,factoryEntryImagePath,factoryEntryImageSHA256;
@@ -114,6 +124,11 @@ struct Runtime {
     std::shared_ptr<Adapter> adapter;
     std::unique_ptr<lab::StandaloneARACoordinator> coordinator;
     std::unique_ptr<lab::FLStandaloneSourceOverlay> overlay;
+    slot_power::Registry<32> nativeSlotPowerRegistry;
+    std::array<slot_power::Binding*,32> nativeSlotPowerSlots{};
+    std::vector<std::unique_ptr<slot_power::Binding>> nativeSlotPowerStorage;
+    std::uint64_t nextNativeSlotPowerGeneration=1;std::uintptr_t nativeSlotPowerWrapperImageBase=0;
+    bool nativeSlotPowerInstallBoundary=false,nativeSlotPowerStopNoticeQueued=false;
     std::atomic<lab::FLStandaloneSourceOverlay*> overlayListener{nullptr};
     std::atomic<std::uint64_t> unsupportedOffMainARAInitializations{0},unboundArchiveRefusals{0};
     std::atomic<BridgeRecord*> head{nullptr};
@@ -135,6 +150,79 @@ struct Runtime {
 // Intentionally process lifetime: native record callbacks may outlive app teardown.
 Runtime& runtime(){static auto* r=new Runtime;return *r;}
 BridgeRecord* record(hooks::InstanceRecord& n)noexcept{return static_cast<BridgeRecord*>(n.ownerData.load());}
+bool nativeSlotPowerInstallationBoundary(void*)noexcept{
+    return pthread_main_np()&&nativeApplicationAdmitted()&&runtime().nativeSlotPowerInstallBoundary;
+}
+bool nativeSlotPowerObserverReady()noexcept{const auto state=slot_power::nativeSlotPowerObserverStats();return state.installed&&state.protectionRestored;}
+std::uintptr_t loadedOwnedWrapperImageBase(){
+    const auto& path=nativeApplication().wrapperPath;std::uintptr_t found=0;
+    for(std::uint32_t i=0;i<_dyld_image_count();++i){const char* name=_dyld_get_image_name(i);char canonical[4096];
+        if(!name||!realpath(name,canonical)||path!=canonical)continue;
+        const auto base=reinterpret_cast<std::uintptr_t>(_dyld_get_image_header(i));if(found&&found!=base)return 0;found=base;
+    }return found;
+}
+void observeLoadedNativeSlotPower(const hooks::ThreadInfo& info)noexcept{
+    if(!info.isMainThread||info.insideNativeProcess||!nativeApplicationAdmitted()||currentNativeSaveTransaction())return;
+    auto& rt=runtime();const auto stats=slot_power::nativeSlotPowerObserverStats();
+    if(stats.installed)return; // A published restore failure remains blocked, never reinstalled/unpinned.
+    try{const auto base=loadedOwnedWrapperImageBase();if(!base)return;
+        struct Scope{Runtime& rt;explicit Scope(Runtime& value):rt(value){rt.nativeSlotPowerInstallBoundary=true;}~Scope(){rt.nativeSlotPowerInstallBoundary=false;}}scope(rt);
+        slot_power::ObserverConfig config;config.registry=&rt.nativeSlotPowerRegistry;config.exactLoadedWrapperPath=nativeApplication().wrapperPath;
+        config.actualWrapperImageBase=base;config.confirmAdmittedModelBoundary=nativeSlotPowerInstallationBoundary;
+        const auto result=slot_power::installLoadedNativeSlotPowerObserver(config);
+        if(result.installed&&result.protectionRestored)rt.nativeSlotPowerWrapperImageBase=base;
+    }catch(...){/* The actual bind/publication paths require ready and report failure. */}
+}
+void nativeModuleObserved(const hooks::ModuleRecord&,const hooks::ThreadInfo& info,void*)noexcept{observeLoadedNativeSlotPower(info);}
+void nativeFactoryObserved(hooks::FactoryRecord&,const hooks::ThreadInfo& info,void*)noexcept{observeLoadedNativeSlotPower(info);}
+void nativeInterfaceObserved(hooks::InstanceRecord&,const hooks::ClassID&,void*,const hooks::ImageEvidence&,const hooks::ThreadInfo& info,void*)noexcept{observeLoadedNativeSlotPower(info);}
+void retireNativeSlotPower(BridgeRecord& r)noexcept{if(auto* binding=r.nativeSlotPower.load(std::memory_order_acquire))binding->closePermanently();}
+void finalNativeRelease(hooks::InstanceRecord& n,const hooks::ThreadInfo&,void*)noexcept{if(auto* r=record(n))retireNativeSlotPower(*r);}
+void allocateNativeSlotPower(BridgeRecord& r){
+    if(r.nativeSlotPower.load())return;auto& rt=runtime();
+    demand(pthread_main_np()&&nativeApplicationAdmitted()&&nativeSlotPowerObserverReady(),"native slot-power observer is not safely installed");
+    demand(r.native&&r.native->ownerData.load()==&r&&r.native->nativeAlive&&!r.native->nativeTerminated&&r.alive&&!r.disabled&&!r.teardown
+        &&r.native->actualComponent.load()==reinterpret_cast<Steinberg::Vst::IComponent*>(r.identity.actualComponent)&&!r.identity.instanceID.empty(),"native slot-power requires a genuine live bound component");
+    std::size_t index=rt.nativeSlotPowerSlots.size();for(std::size_t i=0;i<rt.nativeSlotPowerSlots.size();++i)if(!rt.nativeSlotPowerSlots[i]||rt.nativeSlotPowerSlots[i]->closed()){index=i;break;}
+    demand(index<rt.nativeSlotPowerSlots.size()&&rt.nextNativeSlotPowerGeneration<std::numeric_limits<std::uint64_t>::max(),"native slot-power binding capacity/generation exhausted");
+    auto owned=std::make_unique<slot_power::Binding>(r.insert.effectWrapper,r.identity.actualComponent,rt.nextNativeSlotPowerGeneration++);auto* value=owned.get();
+    rt.nativeSlotPowerStorage.push_back(std::move(owned));rt.nativeSlotPowerSlots[index]=value;r.nativeSlotPowerRegistryIndex=static_cast<std::uint32_t>(index);r.nativeSlotPower.store(value,std::memory_order_release);
+}
+template<class T>bool readNativePowerOffset(std::uintptr_t base,std::uintptr_t offset,T& value)noexcept{
+    if(!base||base>UINTPTR_MAX-offset||base+offset>UINTPTR_MAX-sizeof(T))return false;mach_vm_size_t bytes=0;
+    return mach_vm_read_overwrite(mach_task_self(),base+offset,sizeof(T),reinterpret_cast<mach_vm_address_t>(&value),&bytes)==KERN_SUCCESS&&bytes==sizeof(T);
+}
+bool nativeSlotPowerAssociationCurrent(const BridgeRecord& r)noexcept{
+    std::uintptr_t plugin=0;return revalidateActualNativeInsert(r.insert)&&readNativePowerOffset(r.insert.effectWrapper,0x50a8,plugin)&&plugin==r.insert.plugin;
+}
+struct NativePowerWitness{std::uint8_t effectiveTag8a=2;};
+bool readNativePowerWitness(const BridgeRecord& r,NativePowerWitness& value)noexcept{
+    return nativeSlotPowerAssociationCurrent(r)&&readNativePowerOffset(r.insert.tag,0x8a,value.effectiveTag8a);
+}
+// ONLY inside the genuine stopped/drained HostLockMix copy callback. Adoption
+// proof precedes registry publication. Seed evidence is then freshly repeated
+// AFTER the token, with all actual ID11 notifications already observable.
+void observeNativeSlotPowerAtActualMixLock(BridgeRecord& r){
+    auto* binding=r.nativeSlotPower.load();demand(binding&&!binding->closed()&&binding->wrapper==r.insert.effectWrapper&&binding->actualComponent==r.identity.actualComponent,"native slot-power generation is closed or mismatched");
+    if(!r.nativeSlotPowerRegistered){
+        if(!nativeSlotPowerAssociationCurrent(r)){retireNativeSlotPower(r);throw std::runtime_error("native slot-power adoption owner/backlink changed");}
+        demand(runtime().nativeSlotPowerRegistry.publishAtModelBoundary(r.nativeSlotPowerRegistryIndex,*binding),"native slot-power registry refused exact generation");r.nativeSlotPowerRegistered=true;
+    }
+    const auto current=binding->snapshotForBlock();if(current!=slot_power::Power::Unknown){
+        if(!r.nativeSlotPowerSeedAttempted)++r.nativeSlotPowerSeedSkippedNotifications;r.nativeSlotPowerSeedAttempted=true;r.nativeSlotPowerKnownOnce=true;return;
+    }
+    if(r.nativeSlotPowerSeedAttempted)return;
+    r.nativeSlotPowerSeedAttempted=true;const auto token=binding->captureInitialSeedAtStoppedBoundary();
+    NativePowerWitness first,second;
+    if(!readNativePowerWitness(r,first)||!readNativePowerWitness(r,second)){retireNativeSlotPower(r);throw std::runtime_error("native slot-power seed repeated owner/backlink read failed");}
+    if(binding->snapshotForBlock()!=slot_power::Power::Unknown||binding->callsInFlight()){
+        ++r.nativeSlotPowerSeedSkippedNotifications;r.nativeSlotPowerKnownOnce=binding->snapshotForBlock()!=slot_power::Power::Unknown;return;
+    }
+    const bool valid=first.effectiveTag8a<=1&&second.effectiveTag8a==first.effectiveTag8a;
+    if(binding->trySeedAtStoppedBoundary(token,valid?first.effectiveTag8a:2)){++r.nativeSlotPowerSeedSuccesses;r.nativeSlotPowerKnownOnce=true;}
+    else ++r.nativeSlotPowerSeedRefusals;
+}
+
 bool admitted(void*)noexcept{return nativeApplicationAdmitted();}
 bool stopped(){std::int32_t value=-1;return readActualNativeTransportState(value)&&value==0;}
 bool allBoundary(void*)noexcept{return runtime().anyBoundary&&pthread_main_np()&&stopped();}
@@ -250,9 +338,11 @@ lab::StandaloneSnapshotData captureActualNativeSnapshotData(BridgeRecord& target
     lab::FLStandaloneComponentAssociation association;association.actualComponent=identity.actualComponent;
     association.nativeOwnerObject=nativeApplication().engineInstance;association.mixerInsert=r->insert.mixerInsert;
     association.exactObjectAssociationEvidence=r->insert.evidence;association.nativePointerAssociationVerified=revalidateActualNativeInsert(r->insert);
+    allocateNativeSlotPower(*r);
     const auto engineSeal=lab::FLStandaloneGraphDecoder::verifyActualLoadedEngine(nativeApplication().engine);
     std::optional<lab::CapturedFLStandaloneModel> capture;
     const bool locked=withActualNativeMixCaptureLock(r->insert,[&]{
+        observeNativeSlotPowerAtActualMixLock(*r);
         capture=lab::FLStandaloneGraphDecoder::captureActualCurrentRAMAtNativeLock(engineSeal,modelOptions(r->insert.mixerInsert),association);
     });
     demand(locked&&capture.has_value(),"actual native mix-lock RAM capture failed");
@@ -344,7 +434,7 @@ lab::StandaloneNativeStateLoadAuthority loadAuthority(BridgeRecord& r,const hook
 }
 void fail(BridgeRecord& r,const std::string& reason)noexcept{
     if(!pthread_main_np()){r.fault=true;return;}
-    try{r.error=reason;r.disabled=true;r.dirty=false;r.native->nativeProcessAdmission.shutdown();if(runtime().overlay)runtime().overlay->invalidateInstance(r.identity.instanceID);
+    try{retireNativeSlotPower(r);r.error=reason;r.disabled=true;r.dirty=false;r.native->nativeProcessAdmission.shutdown();if(runtime().overlay)runtime().overlay->invalidateInstance(r.identity.instanceID);
         if(runtime().coordinator&&!r.identity.instanceID.empty())runtime().coordinator->disableARAForInsert(r.identity.instanceID,reason);
         writeNativeApplicationEvent("ara_insert_unavailable",reason);r.fault=true;
     }catch(...){r.fault=true;}
@@ -375,6 +465,7 @@ std::optional<hooks::ClassID> araClassForActualComponent(hooks::InstanceRecord& 
     demand(found.has_value(),"actual same native factory lacks independent matching ARA provider");return found;
 }
 void initialized(hooks::InstanceRecord& n,void*,Steinberg::FUnknown* context,Steinberg::tresult result,const hooks::ThreadInfo& info,void*)noexcept{
+    observeLoadedNativeSlotPower(info);
     if(result==kResultOk&&info.isMainThread&&!info.insideNativeProcess)publishControllerAssociationOnMain(n);
     if(n.createdKind!=hooks::CreatedKind::Component||result!=kResultOk||!nativeApplicationAdmitted()||!n.actualComponent.load())return;
     if(!info.isMainThread){
@@ -391,6 +482,7 @@ void initialized(hooks::InstanceRecord& n,void*,Steinberg::FUnknown* context,Ste
         demand(n.factory&&n.factory->actualFactory,"native component actual factory missing");
         auto* component=n.actualComponent.load();auto araClass=araClassForActualComponent(n,*component);if(!araClass)return;
         demand(nativeSaveGuardReady()&&!currentNativeSaveTransaction(),"native project-save preservation guard is unavailable or a save is active");
+        demand(nativeSlotPowerObserverReady(),"native slot-power observer is unavailable; ARA source publication is refused");
         demand(n.factory&&n.factory->module&&!n.factory->moduleAssociationAmbiguous,"native factory provenance ambiguous");
         const auto& module=*n.factory->module;
         demand(module.actualBundle&&module.stableExecutableSHA256&&module.nativeCodeLeaseRetained&&module.actualFactoryEntryImage.resolved
@@ -451,6 +543,8 @@ void instanceCreated(hooks::InstanceRecord& n,const hooks::ThreadInfo& info,void
 }
 void refreshAtBoundary(BridgeRecord& r,bool build){
     auto& rt=runtime();publishAllControllerAssociationsOnMain();auto snapshot=rt.coordinator->captureActualCurrentSnapshot(r.identity.instanceID);
+    auto* power=r.nativeSlotPower.load();demand(nativeSlotPowerObserverReady()&&power&&r.nativeSlotPowerRegistered&&!power->closed(),"native slot-power binding is unavailable at model boundary");
+    rt.overlay->associateNativeSlotPowerAtNativeBoundary(r.identity.instanceID,r.identity.actualComponent,*power);
     const auto currentModel=snapshot.data().model.nativeRecordModelSHA256+":"+snapshot.data().model.sourcePCMModelSHA256+":"+std::to_string(snapshot.data().model.clock.ppq)+":"+std::to_string(snapshot.data().model.clock.tempoMilliBPM);
     if(r.pendingArchive){
         // Pure current-RAM preflight precedes any potentially failing ARA action.
@@ -505,7 +599,8 @@ void refreshAtBoundary(BridgeRecord& r,bool build){
         for(const auto& source:cache.modifications)demand(source.reportedLatencySamples==0&&source.reportedHeadSeconds==0&&source.reportedTailSeconds==0,
             "this third-party ARA source cache reports latency/head/tail; overlay profile refuses unsupported timing");
         demand(r.decoded.has_value()&&r.copied,"source overlay requires exact current decoded model");
-        rt.overlay->publish(r.identity.instanceID,*r.decoded,r.copied,std::move(cache));
+        if(!r.nativeSlotPowerSourcePublished&&power->snapshotForBlock()==slot_power::Power::Unknown){r.dirty=true;throw lab::NativeModelBoundaryUnavailable("initial native slot power is unknown; source publication deferred");}
+        rt.overlay->publish(r.identity.instanceID,*r.decoded,r.copied,std::move(cache));r.nativeSlotPowerSourcePublished=true;
         r.preparedNativeSave=rt.coordinator->prepareEditorArchiveForNativeSave(r.identity.instanceID,snapshot);
         r.error.clear();r.initialPrimePending=false;r.initialWaitNoticeShown=false;
         writeNativeApplicationEvent("actual_native_ara_source_cache_published",r.identity.instanceID);
@@ -782,7 +877,7 @@ void setActive(hooks::InstanceRecord& n,Steinberg::TBool active,Steinberg::tresu
 void ensureOverlayAtModelBoundary(){
     auto& rt=runtime();const auto& app=nativeApplication();
     demand(rt.anyBoundary&&app.engineReady,"source hook installation needs actual verified model boundary");
-    if(!rt.overlay){lab::FLStandaloneOverlayConfig config;config.actualEngineImageBase=app.engine.imageBase;
+    if(!rt.overlay){lab::FLStandaloneOverlayConfig config;config.requireNativeSlotPower=true;config.actualEngineImageBase=app.engine.imageBase;
         config.exactLoadedEnginePath=app.enginePath;config.exactEngineArm64SliceSHA256=app.engine.verifiedArm64SliceSHA256;
         config.confirmAlreadyAdmittedOwnedProcess=admitted;config.confirmStoppedDrainedNativeModelBoundary=allBoundary;config.ownerFaultQueued=&rt.overlayFault;config.ownerStaleHoldQueued=&rt.overlayStaleHoldQueued;
         rt.overlay=std::make_unique<lab::FLStandaloneSourceOverlay>(std::move(config));rt.overlayListener.store(rt.overlay.get(),std::memory_order_release);
@@ -838,7 +933,7 @@ void processing(hooks::InstanceRecord& n,Steinberg::TBool enabled,Steinberg::tre
     catch(...){fail(*r,"unknown native SDK lifecycle exception");}
 }
 void beforeTerminate(hooks::InstanceRecord& n,void*,const hooks::ThreadInfo& info,void*)noexcept{
-    auto* r=record(n);if(!r)return;
+    auto* r=record(n);if(!r)return;retireNativeSlotPower(*r);
     try{demand(info.isMainThread&&!r->active&&!r->processing,"actual native component must deactivate and stop before ARA terminate");
         TeardownBoundary boundary(*r,sealedNativeCaller(info));
         writeNativeApplicationEvent("actual_native_before_original_terminate_authority",r->identity.instanceID+" "+nativeCallerEvidence(info));
@@ -854,7 +949,7 @@ void beforeTerminate(hooks::InstanceRecord& n,void*,const hooks::ThreadInfo& inf
     catch(...){fail(*r,"unknown native SDK lifecycle exception");}
 }
 void terminated(hooks::InstanceRecord& n,void*,Steinberg::tresult result,const hooks::ThreadInfo& info,void*)noexcept{
-    if(auto* r=record(n))try{runtime().coordinator->observeOriginalTerminateResult(r->identity.instanceID,result);r->alive=false;}catch(const std::exception& e){fail(*r,e.what());}
+    if(auto* r=record(n))try{retireNativeSlotPower(*r);runtime().coordinator->observeOriginalTerminateResult(r->identity.instanceID,result);r->alive=false;}catch(const std::exception& e){fail(*r,e.what());}
     catch(...){fail(*r,"unknown native SDK lifecycle exception");}
 }
 void invalidateAssociatedARACache(BridgeRecord& r)noexcept{
@@ -956,6 +1051,16 @@ bool status(){
         d[@"native_setup_history_overflow"]=@(setupCount>32?setupCount-32:0);d[@"native_setup_history_count_saturated"]=@(setupCount==std::numeric_limits<std::uint64_t>::max());d[@"native_setup_history_completed_only"]=@YES;
         d[@"native_set_active_calls"]=@(r->native->activationCalls.load());d[@"native_set_processing_calls"]=@(r->native->processingCalls.load());
         d[@"native_set_active_enabled"]=@(r->active.load());d[@"native_set_processing_enabled"]=@(r->processing.load());
+        const auto* power=r->nativeSlotPower.load(std::memory_order_acquire);
+        d[@"native_slot_power_binding_present"]=@(power!=nullptr);d[@"native_slot_power_registry_index"]=@(r->nativeSlotPowerRegistryIndex);
+        d[@"native_slot_power_registered"]=@(r->nativeSlotPowerRegistered);d[@"native_slot_power_seed_attempted"]=@(r->nativeSlotPowerSeedAttempted);
+        d[@"native_slot_power_known_once"]=@(r->nativeSlotPowerKnownOnce);d[@"native_slot_power_source_published"]=@(r->nativeSlotPowerSourcePublished);
+        d[@"native_slot_power_wrapper"]=@(power?power->wrapper:0);d[@"native_slot_power_actual_component"]=@(power?power->actualComponent:0);
+        d[@"native_slot_power_generation"]=@(power?power->generation:0);d[@"native_slot_power_snapshot"]=@(static_cast<std::uint8_t>(power?power->snapshotForBlock():slot_power::Power::Unknown));
+        d[@"native_slot_power_closed"]=@(power&&power->closed());d[@"native_slot_power_calls_in_flight"]=@(power?power->callsInFlight():0);
+        d[@"native_slot_power_seed_successes"]=@(r->nativeSlotPowerSeedSuccesses);d[@"native_slot_power_seed_refusals"]=@(r->nativeSlotPowerSeedRefusals);
+        d[@"native_slot_power_seed_skipped_notifications"]=@(r->nativeSlotPowerSeedSkippedNotifications);d[@"native_slot_power_stop_pending"]=@(r->nativeSlotPowerStopPending.has_value());
+        d[@"native_slot_power_stops_verified"]=@(r->nativeSlotPowerStopsVerified);
         d[@"empty_lifecycle_bind_mix_diagnostic"]=@(nativeMixBoundaryReason(r->lifecycleBindingMixDiagnostic.reason));
         d[@"empty_lifecycle_bind_diagnostic_is_model_boundary_proof"]=@NO;
         d[@"prepared_ara_archive_available"]=@(r->preparedNativeSave.has_value());
@@ -968,6 +1073,11 @@ bool status(){
             d[@"cache_published"]=@(cache.published);d[@"cache_authorized"]=@(cache.ticketAuthorized);d[@"cache_ticket_epoch"]=@(cache.ticketEpoch);d[@"cache_capture_serial"]=@(cache.captureSerial);d[@"source_stale_hold_active"]=@(cache.staleHoldActive);
             d[@"source_held_callbacks"]=@(cache.counters.heldCallbacks);d[@"source_held_frames"]=@(cache.counters.heldFrames);d[@"source_stale_hold_requests"]=@(cache.counters.staleHoldRequests);
             d[@"source_applied_callbacks"]=@(cache.counters.appliedCallbacks);d[@"source_applied_frames"]=@(cache.counters.appliedFrames);
+            d[@"source_native_power_disabled_original_callbacks"]=@(cache.counters.nativePowerDisabledOriginalCallbacks);d[@"source_native_power_disabled_original_frames"]=@(cache.counters.nativePowerDisabledOriginalFrames);
+            d[@"source_native_power_unknown_held_callbacks"]=@(cache.counters.nativePowerUnknownHeldCallbacks);d[@"source_native_power_unknown_held_frames"]=@(cache.counters.nativePowerUnknownHeldFrames);
+            d[@"source_native_slot_power_required"]=@(cache.nativeSlotPowerRequired);d[@"source_native_slot_power_binding_present"]=@(cache.nativeSlotPowerBindingPresent);
+            d[@"source_native_slot_power_wrapper"]=@(cache.nativeSlotPowerWrapper);d[@"source_native_slot_power_component"]=@(cache.nativeSlotPowerActualComponent);
+            d[@"source_native_slot_power_generation"]=@(cache.nativeSlotPowerGeneration);d[@"source_native_slot_power_snapshot"]=@(cache.nativeSlotPowerSnapshot);
             d[@"source_rejected_callbacks"]=@(cache.counters.rejected);d[@"source_fault_bits"]=@(cache.counters.faultBits);
             d[@"physical_identity_diagnostic_ready_mask"]=@(cache.physicalIdentityDiagnosticReadyMask);d[@"physical_identity_diagnostic_overflow"]=@(cache.physicalIdentityDiagnosticOverflow);
             d[@"physical_identity_diagnostics"]=physicalIdentityHistoryDiagnosticJSON(cache);d[@"physical_identity_diagnostic_addresses_are_values_only"]=@YES;
@@ -1042,6 +1152,10 @@ bool status(){
         @"preflights":@(rt.nativeSavePreflights),@"preflights_allowed":@(rt.nativeSavePreflightsAllowed),@"precommits_allowed":@(rt.nativeSavePrecommitsAllowed),
         @"envelopes_serialized":@(rt.nativeSaveEnvelopes),@"native_frames_finished":@(rt.nativeSaveFramesFinished),@"active_owner_freeze":@(rt.nativeSaveFreeze!=nullptr),
         @"last_error":@(rt.nativeSaveError.c_str()),@"whole_file_runtime_save_proven":@NO};
+    const auto powerObserver=slot_power::nativeSlotPowerObserverStats();
+    data[@"native_slot_power_observer"]=@{@"installed":@(powerObserver.installed),@"protection_restored":@(powerObserver.protectionRestored),
+        @"ready":@(powerObserver.installed&&powerObserver.protectionRestored),@"entries":@(powerObserver.entries),@"in_flight":@(powerObserver.inFlight),
+        @"id11_entries":@(powerObserver.id11Entries),@"normal_returns":@(powerObserver.normalReturns),@"install_reason":@(static_cast<std::uint32_t>(powerObserver.lastInstallReason))};
     data[@"controller_state_association_checks_passed"]=@(rt.separateControllerAssociationsVerified);
     data[@"native_observed_state_dirty_requests_returned"]=@(rt.nativeObservedStateDirtyRequestsReturned);
     const auto sourceGlobalCounters=rt.overlay?rt.overlay->counters():lab::FLStandaloneOverlayCounters{};
@@ -1070,6 +1184,48 @@ bool status(){
     NSData* json=[NSJSONSerialization dataWithJSONObject:data options:NSJSONWritingPrettyPrinted error:nil];
     return json&&[json writeToFile:@((app.runDirectory+"/fl-ara-status.json").c_str()) atomically:YES];
 }
+// Power uncertainty is a separate STOP reason. It carries no cache ticket
+// and must never be converted into an edit, invalidation or source rebuild.
+bool nativeSlotPowerHoldMatchesRecord(const BridgeRecord& r,const lab::FLStandaloneOverlayStaleHoldRecord& hold)noexcept{
+    if(hold.reason!=lab::FLStandaloneOverlayHoldReason::NativeSlotPowerUnknown||!r.alive||r.teardown||r.disabled||!r.native
+        ||r.identity.instanceID!=hold.instanceID||r.identity.actualComponent!=hold.actualNativeComponent
+        ||r.native->ownerData.load()!=&r||!r.native->nativeAlive||r.native->nativeTerminated
+        ||reinterpret_cast<std::uintptr_t>(r.native->actualComponent.load())!=hold.actualNativeComponent)return false;
+    const auto* binding=r.nativeSlotPower.load(std::memory_order_acquire);
+    if(binding!=hold.nativeSlotPowerBinding)return false;
+    if(!binding)return hold.nativeSlotPowerBindingMissing;
+    return !hold.nativeSlotPowerBindingMissing&&binding->actualComponent==hold.actualNativeComponent
+        &&binding->wrapper==hold.nativeSlotPowerWrapper&&binding->wrapper==r.insert.effectWrapper
+        &&binding->generation==hold.nativeSlotPowerGeneration&&binding->snapshotForBlock()==slot_power::Power::Unknown;
+}
+bool nativeSlotPowerHoldStillCurrent(const BridgeRecord& r,const lab::FLStandaloneOverlayStaleHoldRecord& hold){
+    return nativeSlotPowerHoldMatchesRecord(r,hold)&&runtime().overlay
+        &&runtime().overlay->nativeSlotPowerHoldStillUnknownOnModelThread(hold);
+}
+void drainNativeSlotPowerStop(BridgeRecord& r){
+    if(!r.nativeSlotPowerStopPending)return;
+    const auto& hold=*r.nativeSlotPowerStopPending;
+    if(!nativeSlotPowerHoldStillCurrent(r,hold)){r.nativeSlotPowerStopPending.reset();return;}
+    std::int32_t raw=-1;
+    if(!readActualNativeTransportState(raw)||(raw!=0&&raw!=1)){
+        r.error="Native slot power is unknown; STOP awaits a verified native transport";return;
+    }
+    const bool wasPlaying=raw==1;
+    if(wasPlaying){
+        // Immediately before STOP: completed notification, replacement or ended
+        // component discards this request without changing cache authority.
+        if(!nativeSlotPowerHoldStillCurrent(r,hold)){r.nativeSlotPowerStopPending.reset();return;}
+        if(!requestActualNativePlaying(r.insert,false)){
+            r.error="Native slot power is unknown; the native STOP request was refused";return;
+        }
+    }
+    if(!readActualNativeTransportState(raw)||raw!=0){
+        r.error="Native slot power is unknown; the native STOP request was not verified";return;
+    }
+    r.nativeSlotPowerStopPending.reset();
+    if(wasPlaying){++r.nativeSlotPowerStopsVerified;runtime().nativeSlotPowerStopNoticeQueued=true;
+        writeNativeApplicationEvent("actual_native_slot_power_unknown_stopped",r.identity.instanceID);}
+}
 void tick(const NativeApplication& app,void*)noexcept{
     if(!pthread_main_np()||!nativeApplicationAdmitted())return;
     pollNativeSaveGuardTransactions();
@@ -1094,7 +1250,7 @@ void tick(const NativeApplication& app,void*)noexcept{
             NSAlert* alert=[NSAlert new];alert.messageText=@"ARA unavailable for this native component";alert.informativeText=@(rt.error.c_str());
             [alert addButtonWithTitle:@"Keep session open"];status();if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];
         }
-        if(!rt.overlay&&app.engineReady){lab::FLStandaloneOverlayConfig config;config.actualEngineImageBase=app.engine.imageBase;
+        if(!rt.overlay&&app.engineReady){lab::FLStandaloneOverlayConfig config;config.requireNativeSlotPower=true;config.actualEngineImageBase=app.engine.imageBase;
             config.exactLoadedEnginePath=app.enginePath;config.exactEngineArm64SliceSHA256=app.engine.verifiedArm64SliceSHA256;
             config.confirmAlreadyAdmittedOwnedProcess=admitted;config.confirmStoppedDrainedNativeModelBoundary=allBoundary;config.ownerFaultQueued=&rt.overlayFault;config.ownerStaleHoldQueued=&rt.overlayStaleHoldQueued;
             rt.overlay=std::make_unique<lab::FLStandaloneSourceOverlay>(std::move(config));
@@ -1113,11 +1269,16 @@ void tick(const NativeApplication& app,void*)noexcept{
             }else fail(*r,"actual native source read violates this source-overlay profile");
         }
         if(rt.overlayStaleHoldQueued.exchange(false)&&rt.overlay)for(const auto& hold:rt.overlay->takeStaleHoldsOnModelThread())if(auto* r=rt.byID(hold.instanceID)){
+            if(hold.reason==lab::FLStandaloneOverlayHoldReason::NativeSlotPowerUnknown){
+                if(nativeSlotPowerHoldStillCurrent(*r,hold))r->nativeSlotPowerStopPending=hold;
+                continue; // No dirty/cache authority/rebuild operation for power.
+            }
             if(!r->alive||r->identity.actualComponent!=hold.actualNativeComponent||currentNativeCacheGenerationCoherent(*r))continue;
             // hold.ticketEpoch identifies the STALE PUBLISHED ticket. Its
             // difference from gate.currentTicket() is expected, not obsolescence.
             r->dirty=true;queueNativeStopForCacheRebuild(*r,hold.ticketEpoch);
         }
+        for(auto& owned:rt.records)drainNativeSlotPowerStop(*owned);
         for(auto& owned:rt.records){auto& r=*owned;if(!r.alive||r.teardown||!r.nativeStopForRebuildPending.exchange(false))continue;
             if(currentNativeCacheGenerationCoherent(r))continue;
             std::int32_t raw=-1;
@@ -1136,6 +1297,10 @@ void tick(const NativeApplication& app,void*)noexcept{
                 NSAlert* alert=[NSAlert new];alert.messageText=@"ARA unavailable for this FL insert";alert.informativeText=@(r.error.c_str());
                 [alert addButtonWithTitle:@"Keep session open"];status();if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];r.fault=false;}
             if(r.disabled||!r.setupQualified||!stopped())continue;
+            // An Unknown power notification alone never turns a coherent ARA
+            // cache into model work, including an irreversibly closed binding.
+            const auto* power=r.nativeSlotPower.load(std::memory_order_acquire);
+            if(power&&power->snapshotForBlock()==slot_power::Power::Unknown&&currentNativeCacheGenerationCoherent(r))continue;
             try{Boundary boundary(r);ensureOverlayAtModelBoundary();
                 refreshAtBoundary(r,true);rt.overlay->collectRetiredOnModelThread();}
             catch(const lab::NativeModelBoundaryUnavailable& e){r.error=std::string("Native model boundary deferred: ")+e.what();if(!currentNativeCacheGenerationCoherent(r))r.dirty=true;}
@@ -1181,6 +1346,11 @@ void tick(const NativeApplication& app,void*)noexcept{
             alert.informativeText=@"Native FL playback was stopped while changed ARA source caches rebuild. Playback remains stopped; press Play when the insert is ready.";
             [alert addButtonWithTitle:@"Keep stopped"];status();if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];
         }
+        if(rt.nativeSlotPowerStopNoticeQueued){rt.nativeSlotPowerStopNoticeQueued=false;
+            NSAlert* alert=[NSAlert new];alert.messageText=@"Playback stopped while an FL effect changes power";
+            alert.informativeText=@"ARA playback is held until FL reports this effect slot's enabled state. The prepared ARA audio is preserved.";
+            [alert addButtonWithTitle:@"Keep stopped"];status();if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];
+        }
         if(rt.nativeSaveAlertQueued){rt.nativeSaveAlertQueued=false;
             NSAlert* alert=[NSAlert new];alert.messageText=@"FL project save was refused to preserve ARA state";
             alert.informativeText=@(rt.nativeSaveError.c_str());[alert addButtonWithTitle:@"Keep session open"];
@@ -1193,7 +1363,8 @@ void onAdmitted(const NativeApplication& app,void*)noexcept{
     try{auto& rt=runtime();const char* testUID=getenv("RYSUP_FLARA_TEST_AUDIO_DEVICE_UID");rt.observeNativeDSP=testUID&&!std::strcmp(testUID,"Pro Tools Audio Bridge 2-A_UID");rt.adapter=std::make_shared<Adapter>();rt.coordinator=std::make_unique<lab::StandaloneARACoordinator>(app.runID,rt.adapter);
         hooks::Config config;config.exactOwnedExecutablePath=app.executablePath;config.exactOwnedExecutableSHA256=app.executableSHA256;
         config.exactOwnedProcessID=app.processID;config.confirmAlreadyAdmittedOwnedProcess=admitted;
-        config.callbacks.instanceCreated=instanceCreated;config.callbacks.initialized=initialized;config.callbacks.state=state;
+        config.callbacks.moduleObserved=nativeModuleObserved;config.callbacks.factoryObserved=nativeFactoryObserved;config.callbacks.interfaceObserved=nativeInterfaceObserved;
+        config.callbacks.finalReleaseObserved=finalNativeRelease;config.callbacks.instanceCreated=instanceCreated;config.callbacks.initialized=initialized;config.callbacks.state=state;
         config.callbacks.setActiveObserved=setActive;config.callbacks.setupProcessingObserved=setup;config.callbacks.setProcessingObserved=processing;
         config.callbacks.beforeTerminate=beforeTerminate;config.callbacks.terminated=terminated;config.callbacks.fault=fault;
         config.callbacks.controllerHandlerObserved=controllerHandlerObserved;config.callbacks.paramEditObserved=parameterEdit;config.callbacks.paramNormalizedObserved=parameterNormalized;config.callbacks.inputParameterChangesObserved=inputParameterChanges;

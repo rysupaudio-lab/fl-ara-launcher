@@ -14,6 +14,12 @@ def sanitized_manifest(raw, helper, root):
             'runtime_admission_scope':raw.get('runtime_admission_scope','owned-qualification-candidate')}
     if result['runtime_admission_scope'] not in {'bare-startup-test-only','owned-qualification-candidate','qualified-runtime'}:raise ValueError('Unrecognized runtime admission scope')
     for name in FLAGS:result[name]=raw.get(name) is True
+    rate_hold=helper.parent/'RysUpRateHold.dylib'
+    if rate_hold.exists() or 'rate_hold_sha256' in raw:
+        if not rate_hold.is_file() or rate_hold.is_symlink():raise ValueError('Sealed rate-hold companion is missing or a symlink')
+        if 'rate_hold_sha256' in raw and (not isinstance(raw['rate_hold_sha256'],str) or not re.fullmatch('[0-9a-f]{64}',raw['rate_hold_sha256'])):
+            raise ValueError('Invalid rate-hold companion seal')
+        result['rate_hold_sha256']=hashlib.sha256(rate_hold.read_bytes()).hexdigest()
     if 'routing_only' in raw and not isinstance(raw['routing_only'],bool):raise ValueError('Expected boolean routing-only scope')
     if raw.get('routing_only') is True:
         restrictions={'routing_only':True,'device_start_fix':False,'no_device_start_fix':True,
@@ -68,6 +74,12 @@ def sanitized_manifest(raw, helper, root):
                 for file in sorted((bridge/folder).iterdir()):
                     if file.is_file() and not file.is_symlink() and file.suffix in {'.h','.hpp','.cpp','.mm','.py'}:
                         hashes[str(file.relative_to(root))]=hashlib.sha256(file.read_bytes()).hexdigest()
+    rate_source=root/'native/RysUpRateHold.c'
+    if 'rate_hold_sha256' in result:
+        if not rate_source.is_file() or rate_source.is_symlink():raise ValueError('Rate-hold source is missing or a symlink')
+        seal=hashlib.sha256(rate_source.read_bytes()).hexdigest()
+        if hashes.get('native/RysUpRateHold.c',seal)!=seal:raise ValueError('Rate-hold source differs from its manifest seal')
+        hashes['native/RysUpRateHold.c']=seal
     result['input_relative_hashes']=hashes
     # Public build profile is explicit and contains no arbitrary compile-manifest strings.
     result['profile']={'architecture':'arm64','minimum_macos':'15.4','fl_version':'26.1.7.5421','initial_sample_rate':48000,

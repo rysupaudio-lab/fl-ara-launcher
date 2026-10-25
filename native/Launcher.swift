@@ -1,11 +1,12 @@
 // Native app and CLI: no Python, compiler or Apple binaries in the distribution.
 import AppKit
+import AudioToolbox
 import CryptoKit
 import Darwin
 import CoreServices
 import UniformTypeIdentifiers
 
-let launcherVersion = "0.1.0-candidate.12"
+let launcherVersion = "0.1.0-candidate.13"
 let enginePath = "Contents/Libs/FLEngine_x64.dylib"
 let executablePath = "Contents/MacOS/OsxFL"
 let engineHash = "8d23eebf0fc63fdd1957ba2c8d0f1f1d4e053a9f43173d3c22606c47ace7b76d"
@@ -67,15 +68,82 @@ func rejectSymlinkAncestors(_ url: URL) throws {
     }
 }
 func xmlEscape(_ value: String) -> String { value.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;") }
-func preparePrivateHome(_ home: URL, tmp: URL, userData: URL, testDevice: String? = nil) throws {
+final class BatchRenderSettingsReader: NSObject, XMLParserDelegate {
+    var keys: [String] = []; var values: [String: String] = [:]
+    var name: String?; var text = ""
+    let allowed: Set<String> = ["TypeBox", "FormatBox", "QualityBox", "MiscBox", "LMBox", "IPBox", "WFBox", "DitherBox", "NoPolyBox", "PlugHQBox", "BatchBox", "AcidBox", "NoteMarkersBox", "LCBox", "InputFXBox", "MasterFXBox", "PlaylistMarkersBox", "LoopMarkersBox", "ChannelsBox", "SplitMasterBox", "SplitCurrentBox", "OpenRenderLocationBox"]
+    func parser(_ parser: XMLParser, didStartElement element: String, namespaceURI: String?, qualifiedName: String?, attributes a: [String: String]) {
+        if element == "Key" { keys.append(a["Name"] ?? "") }
+        if element == "Value", keys.suffix(4).elementsEqual(["Image-Line", "FL Studio 26", "General", "WAVRenderForm"]),
+           a["Type"] == "2", let key = a["Name"], allowed.contains(key) { name = key; text = "" }
+    }
+    func parser(_ parser: XMLParser, foundCharacters value: String) { if name != nil { text += value } }
+    func parser(_ parser: XMLParser, didEndElement element: String, namespaceURI: String?, qualifiedName: String?) {
+        if element == "Value", let key = name {
+            let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let number = Int(value), (0...1048576).contains(number) { values[key] = value }
+            name = nil
+        }
+        if element == "Key", !keys.isEmpty { keys.removeLast() }
+    }
+}
+func batchRenderSettingsXML() throws -> String {
+    let file = fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Preferences/Image-Line/reg.xml")
+    let data = try Data(contentsOf: file)
+    guard !data.contains(0), !String(decoding: data, as: UTF8.self).uppercased().contains("<!DOCTYPE") else { throw fail("Unsupported registry XML for the private batch settings copy.") }
+    let reader = BatchRenderSettingsReader(), parser = XMLParser(data: data)
+    parser.delegate = reader; parser.shouldResolveExternalEntities = false
+    guard parser.parse(), !reader.values.isEmpty else { throw fail("Native WAV render settings were not found.") }
+    // The audited native WFBox=2 selects float32. Copy numeric render settings
+    // only: no registry/license data, paths, account state or whole preferences.
+    reader.values["WFBox"] = "2"
+    let values = reader.values.keys.sorted().map { "<Value Name=\"\($0)\" Type=\"2\">\(reader.values[$0]!)</Value>" }.joined()
+    return "<Key Name=\"General\"><Key Name=\"WAVRenderForm\">\(values)</Key></Key>"
+}
+func verifyNativeBatchOutput(run: URL, runID: String, pid: Int32) throws -> [String: Any] {
+    let resultURL = run.appendingPathComponent("headless-export-result.json")
+    guard var result = try JSONSerialization.jsonObject(with: Data(contentsOf: resultURL)) as? [String: Any],
+          result["run_id"] as? String == runID, result["pid"] as? Int32 == pid,
+          result["route"] as? String == "normal_native_cli", result["native_creation_returned"] as? Bool == true,
+          result["native_create_result"] as? Int == 0, let outputPath = result["output"] as? String else {
+        throw fail("The owned native batch did not return its matching observation receipt.")
+    }
+    let output = URL(fileURLWithPath: outputPath)
+    guard output.deletingLastPathComponent() == run.appendingPathComponent("export"), output.pathExtension == "wav" else { throw fail("Unexpected native batch output path.") }
+    try rejectSymlinkAncestors(output)
+    let attributes = try fm.attributesOfItem(atPath: output.path)
+    guard attributes[.type] as? FileAttributeType == .typeRegular,
+          (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid() else { throw fail("The native batch output is not an owned regular file.") }
+    var audio: AudioFileID?
+    guard AudioFileOpenURL(output as CFURL, .readPermission, kAudioFileWAVEType, &audio) == noErr, let audio else { throw fail("Native batch did not produce readable WAVE audio.") }
+    defer { AudioFileClose(audio) }
+    var format = AudioStreamBasicDescription(); var size = UInt32(MemoryLayout.size(ofValue: format))
+    guard AudioFileGetProperty(audio, kAudioFilePropertyDataFormat, &size, &format) == noErr,
+          format.mFormatID == kAudioFormatLinearPCM, format.mSampleRate == 48000, format.mChannelsPerFrame == 2,
+          format.mBitsPerChannel == 32, (format.mFormatFlags & kAudioFormatFlagIsFloat) != 0,
+          format.mFramesPerPacket == 1, format.mBytesPerFrame == 8 else { throw fail("Native batch output must be float32 stereo at 48 kHz; output is preserved.") }
+    var frames: UInt64 = 0; size = UInt32(MemoryLayout.size(ofValue: frames))
+    guard AudioFileGetProperty(audio, kAudioFilePropertyAudioDataPacketCount, &size, &frames) == noErr, frames > 0 else { throw fail("Native batch output has no frames.") }
+    var bytes: UInt64 = 0; size = UInt32(MemoryLayout.size(ofValue: bytes))
+    guard AudioFileGetProperty(audio, kAudioFilePropertyAudioDataByteCount, &size, &bytes) == noErr,
+          frames <= UInt64.max / 8, bytes == frames * 8 else { throw fail("Native batch WAVE extent is incomplete.") }
+    result.merge(["state": "native_cli_output_verified", "completed": true, "output_verified": true,
+                  "sample_rate": 48000, "channels": 2, "bits_per_sample": 32, "sample_format": "float",
+                  "frames": frames, "output_sha256": try digest(output)]) { _, new in new }
+    try jsonWrite(result, resultURL); return result
+}
+func preparePrivateHome(_ home: URL, tmp: URL, userData: URL, testDevice: String? = nil, batchExport: Bool = false) throws {
     for folder in [home, tmp, userData, home.appendingPathComponent("Library/Preferences/Image-Line"), home.appendingPathComponent("Library/Application Support"), home.appendingPathComponent("Documents"), home.appendingPathComponent("Desktop")] {
         try rejectSymlinkAncestors(folder)
         try fm.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     }
     // Deliberately synthesize only path settings. Never read or duplicate license keys,
     // the original Image-Line registry, whole home folders or write-through symlinks.
-    let device = testDevice == nil ? "" : "<Value Name=\"Device name\" Type=\"2\">4Pro Tools Audio Bridge 2-A</Value>"
-    let audio = "<Key Name=\"FL Studio 26\"><Key Name=\"Devices\"><Key Name=\"Audio output\"><Value Name=\"Sample rate\" Type=\"2\">48000</Value>\(device)</Key></Key></Key>"
+    let device = testDevice == nil && !batchExport ? "" : "<Value Name=\"Device name\" Type=\"2\">4Pro Tools Audio Bridge 2-A</Value>"
+    let input = batchExport ? "<Key Name=\"Audio Input\">\(device)</Key>" : ""
+    let render = batchExport ? try batchRenderSettingsXML() : ""
+    let inputDisabled = batchExport ? "<Key Name=\"DSTITF\"><Value Name=\"InputDisabled\" Type=\"2\">1</Value></Key>" : ""
+    let audio = "<Key Name=\"FL Studio 26\"><Key Name=\"Devices\"><Key Name=\"Audio output\"><Value Name=\"Sample rate\" Type=\"2\">48000</Value>\(device)</Key>\(input)</Key>\(render)\(inputDisabled)</Key>"
     let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><XMLReg><Key Name=\"Key1\"><Key Name=\"HKEY_CURRENT_USER\"><Key Name=\"Software\"><Key Name=\"Image-Line\"><Key Name=\"Shared\"><Key Name=\"Paths\"><Value Name=\"Shared data\" Type=\"2\">\(xmlEscape(userData.path + "/"))</Value></Key></Key>\(audio)</Key></Key></Key></Key></XMLReg>"
     let registry = home.appendingPathComponent("Library/Preferences/Image-Line/reg.xml")
     try Data(xml.utf8).write(to: registry, options: .atomic)
@@ -136,7 +204,7 @@ func prepareSandbox(_ run: URL, source: URL, normalData: URL) throws -> (URL, UR
     let paths = try protected.map { "(subpath " + (try sandboxLiteral(physicalPath($0))) + ")" }.joined(separator: " ")
     let profile = run.appendingPathComponent("write-sandbox.sb"), trampoline = run.appendingPathComponent("exec-private-fl.sh")
     try Data(("(version 1) (allow default) (deny file-write* (require-any " + paths + "))\n").utf8).write(to: profile, options: .atomic)
-    try Data("#!/bin/sh\nset -eu\nexport DYLD_INSERT_LIBRARIES=\"$RYSUP_FLARA_HELPER_PATH\"\nexec \"$RYSUP_FLARA_EXPECTED_EXE\" \"$@\"\n".utf8).write(to: trampoline, options: .atomic)
+    try Data("#!/bin/sh\nset -eu\nif [ \"${RYSUP_FLARA_BATCH_EXPORT:-0}\" = 1 ]; then\nexport DYLD_INSERT_LIBRARIES=\"$RYSUP_FLARA_HELPER_PATH:$RYSUP_FLARA_RATE_HOLD_PATH\"\nelse\nexport DYLD_INSERT_LIBRARIES=\"$RYSUP_FLARA_HELPER_PATH\"\nfi\nexec \"$RYSUP_FLARA_EXPECTED_EXE\" \"$@\"\n".utf8).write(to: trampoline, options: .atomic)
     for item in [profile, trampoline] { try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: item.path) }
     return (profile, trampoline)
 }
@@ -349,6 +417,12 @@ final class Session {
         var receipt = try inspect(source)
         guard fm.fileExists(atPath: helper.path), !helper.path.contains(":") else { throw fail("The bundled native bridge is missing or its path contains a colon.") }
         let helperHash = try digest(helper)
+        let rateHold = helper.deletingLastPathComponent().appendingPathComponent("RysUpRateHold.dylib")
+        if headlessExport {
+            guard !rateHold.path.contains(":"), canonical(rateHold) == rateHold,
+                  admission["rate_hold_sha256"] as? String == (try digest(rateHold)) else { throw fail("The bundled rate-hold companion is missing or unsealed.") }
+            try command("/usr/bin/codesign", ["--verify", "--strict", rateHold.path])
+        }
         let normalData = try normalUserDataPath()
         if let project { guard project.pathExtension == "flp", fm.fileExists(atPath: project.path) else { throw fail("Choose an existing, backed-up .flp project.") } }
         try rejectSymlinkAncestors(cache)
@@ -369,7 +443,9 @@ final class Session {
         do {
             if headlessExport, let project {
                 receipt["headless_export_requested"] = true
-                let output = run.appendingPathComponent("export.wav")
+                let outputDirectory = run.appendingPathComponent("export")
+                try fm.createDirectory(at: outputDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                let output = outputDirectory.appendingPathComponent(project.deletingPathExtension().lastPathComponent + ".wav")
                 guard !fm.fileExists(atPath: output.path) else { throw fail("Owned export output already exists.") }
                 try jsonWrite(["schema": "rysup.fl-ara-owned-export/1", "run_id": runID,
                                "project": project.path, "project_sha256": try digest(project),
@@ -386,7 +462,7 @@ final class Session {
             }
             let home = run.appendingPathComponent("home"), tmp = run.appendingPathComponent("tmp")
             let userData = run.appendingPathComponent("user-data")
-            try preparePrivateHome(home, tmp: tmp, userData: userData, testDevice: testDevice)
+            try preparePrivateHome(home, tmp: tmp, userData: userData, testDevice: testDevice, batchExport: headlessExport)
             let (sandbox, trampoline) = try prepareSandbox(run, source: source, normalData: normalData)
             var env = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("DYLD_") && !$0.key.hasPrefix("RYSUP_") && $0.key != "CFFIXED_USER_HOME" }
             env.merge(["RYSUP_FLARA_HELPER_PATH": helper.path, "RYSUP_FLARA_HELPER_MANIFEST": helper.deletingLastPathComponent().appendingPathComponent("helper.json").path,
@@ -396,10 +472,19 @@ final class Session {
                        "RYSUP_FLARA_SOURCE_APP": source.path, "RYSUP_FLARA_ORIGINAL_REGISTRY_PATH": fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Preferences/Image-Line/reg.xml").path, "RYSUP_FLARA_PROJECT_PATH": project?.path ?? "",
                        "RYSUP_FLARA_MODE": testDevice == nil ? "normal" : "test"]) { _, new in new }
             if let testDevice { env["RYSUP_FLARA_TEST_AUDIO_DEVICE_UID"] = testDevice }
+            var nativeArguments = project.map { [$0.path] } ?? []
+            if headlessExport, let project {
+                env["RYSUP_FLARA_BATCH_EXPORT"] = "1"
+                env["RYSUP_FLARA_RATE_HOLD_PATH"] = rateHold.path
+                env["RYSUP_ENGINE_RATE"] = "48000"
+                env["RYSUP_RATE_HOLD_LOG"] = run.appendingPathComponent("rate-hold.log").path
+                nativeArguments = ["-R", "-Ewav", project.path, "-O" + run.appendingPathComponent("export").path]
+                receipt["headless_export_route"] = "normal_native_cli"
+            }
             let consoleURL = run.appendingPathComponent("console.log"); fm.createFile(atPath: consoleURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
             let console = try FileHandle(forWritingTo: consoleURL); defer { try? console.close() }
             let task = try OwnedChild(executable: URL(fileURLWithPath: "/usr/bin/sandbox-exec"),
-                                      arguments: ["-f", sandbox.path, "/bin/sh", trampoline.path] + (project.map { [$0.path] } ?? []), environment: env, directory: run, console: console)
+                                      arguments: ["-f", sandbox.path, "/bin/sh", trampoline.path] + nativeArguments, environment: env, directory: run, console: console)
             process = task
             receipt["pid"] = task.processIdentifier; receipt["process_group"] = getpgid(task.processIdentifier); receipt["status"] = "starting"; try jsonWrite(receipt, manifest)
             let deadline = Date().addingTimeInterval(180)
@@ -413,10 +498,13 @@ final class Session {
                     if let error = status["error"] as? String, !error.isEmpty { throw fail("Native FL bridge refused: \(error). See \(run.path).") }
                     if status["runtime_helper_admitted"] as? Bool == true, status["native_engine_ready"] as? Bool == true { ready = true; break }
                 }
-                guard task.isRunning else { throw fail(startupExitMessage(task.exitStatusObserved ? task.terminationStatus : nil, diagnostics: run)) }
+                if !task.isRunning {
+                    if headlessExport { break }
+                    throw fail(startupExitMessage(task.exitStatusObserved ? task.terminationStatus : nil, diagnostics: run))
+                }
                 Thread.sleep(forTimeInterval: 0.2)
             }
-            guard ready else { throw fail("Bridge startup was not confirmed. Any live FL Studio copy is preserved. See \(run.path).") }
+            guard ready || (headlessExport && !task.isRunning) else { throw fail("Bridge startup was not confirmed. Any live FL Studio copy is preserved. See \(run.path).") }
             nativeStartupConfirmed = true
             receipt["status"] = "running"; try jsonWrite(receipt, manifest)
             changed("FL Studio is open in a private copy. Wait for ARA audio preparation before playback. Quit this private copy when finished.\nDiagnostics: \(run.path)")
@@ -438,6 +526,10 @@ final class Session {
                     }
                 }
                 Thread.sleep(forTimeInterval: 0.5)
+            }
+            if headlessExport {
+                guard task.exitStatusObserved, task.terminationStatus == 0 else { throw fail("Native batch exited unsuccessfully; diagnostics and output are preserved.") }
+                receipt["native_batch_output"] = try verifyNativeBatchOutput(run: run, runID: runID, pid: task.processIdentifier)
             }
             receipt["status"] = "exited"
         } catch {

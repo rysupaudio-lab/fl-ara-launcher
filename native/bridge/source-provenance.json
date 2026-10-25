@@ -39,7 +39,7 @@
       "transform": null,
       "bytes": 58669,
       "post_consolidation_output_sha256": "0d905b53cdddf204e8edf85b46a7413fa0319f7a8ae0307343bd814473354f6d",
-      "post_consolidation_reason": "current native recall: preserve stopped-editor mode and ignore ended diagnostic owners for export readiness"
+      "post_consolidation_reason": "genuine native CLI batch observer; direct export call removed"
     },
     {
       "destination": "host/GenericARAHost.h",
@@ -138,8 +138,8 @@
       "output_sha256": "e807c51e8b55dfdb571a3d4e08d08370bfb88832a2e0ec6690ae8be6fec77d80",
       "transform": null,
       "bytes": 138132,
-      "post_consolidation_output_sha256": "5c0b342aaf50deade5c6698531639939da70b1e8b067093af6a8b9da72c77db9",
-      "post_consolidation_reason": "current native recall: preserve stopped-editor mode and ignore ended diagnostic owners for export readiness"
+      "post_consolidation_output_sha256": "04943075a14f54bf092fab5b7cffc4188dc4f024b1e32c399786bf95de1cf49a",
+      "post_consolidation_reason": "genuine native CLI batch observer; direct export call removed"
     },
     {
       "destination": "native/FLAppBridgeSaveGuardIntegrationTests.mm",
@@ -153,14 +153,18 @@
       "sha256": "736dd33919cc263b2904f08be8b504cf609ea2c9dd5ff0c2e90eb7ddd827ba2a",
       "output_sha256": "736dd33919cc263b2904f08be8b504cf609ea2c9dd5ff0c2e90eb7ddd827ba2a",
       "transform": null,
-      "bytes": 538
+      "bytes": 538,
+      "post_consolidation_output_sha256": "b1e952fe884165dd54504fc732b5c5fad5a97efa8d3b8beaf97892fcd5d3b92c",
+      "post_consolidation_reason": "genuine native CLI batch observer; direct export call removed"
     },
     {
       "destination": "native/FLHeadlessNativeExport.mm",
       "sha256": "da8c50ebca1ef798129974bdd6c9a56b65caf2d45ce1a70dda0e0938a5e4f92a",
       "output_sha256": "da8c50ebca1ef798129974bdd6c9a56b65caf2d45ce1a70dda0e0938a5e4f92a",
       "transform": null,
-      "bytes": 11940
+      "bytes": 11940,
+      "post_consolidation_output_sha256": "5358e1c1b9f85e25d7e60e06133d95af6412a6594a53d1807ada2c3cdee1e534",
+      "post_consolidation_reason": "genuine native CLI batch observer; direct export call removed"
     },
     {
       "destination": "native/FLNativeApplication.h",

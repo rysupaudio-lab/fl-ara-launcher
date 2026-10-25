@@ -1219,7 +1219,7 @@ bool status(){
     data[@"admitted_source_profile"]=@{@"sample_rate":@48000,@"channels":@[@1,@2],@"maximum_source_seconds":@300,
         @"maximum_pcm_bytes_per_source":@(64u*1024u*1024u),@"maximum_pcm_bytes_total":@(128u*1024u*1024u),
         @"maximum_source_cache_bytes":@(256u*1024u*1024u),@"reported_latency_head_tail_must_be_zero":@YES,@"limits_are_not_runtime_coverage":@YES};
-    data[@"runtime_helper_admitted"]=@(app.admitted);data[@"native_engine_ready"]=@(app.engineReady);data[@"hooks_installed"]=@(rt.hooksInstalled);
+    data[@"runtime_helper_admitted"]=@(app.admitted);data[@"native_engine_ready"]=@(app.engineReady);data[@"native_creation_returned"]=@(app.creationReturned);data[@"hooks_installed"]=@(rt.hooksInstalled);
     data[@"native_project_save_guard"]=@{@"initialized":@(rt.nativeSaveGuardInitialized),@"ready":@(nativeSaveGuardReady()),
         @"protected_unbound_archive_live":@(hasLiveProtectedNativeArchive()),@"record_tracking_incomplete":@(rt.nativeInstanceTrackingIncomplete.load()),
         @"preflights":@(rt.nativeSavePreflights),@"preflights_allowed":@(rt.nativeSavePreflightsAllowed),@"precommits_allowed":@(rt.nativeSavePrecommitsAllowed),
@@ -1430,12 +1430,7 @@ void tick(const NativeApplication& app,void*)noexcept{
             alert.informativeText=@(rt.nativeSaveError.c_str());[alert addButtonWithTitle:@"Keep session open"];
             status();if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];}
         if(++rt.ticks%10==0)status();
-        bool renderReady=!rt.nativeSaveFreeze&&stopped();std::size_t liveARAOwners=0;
-        for(const auto& owned:rt.records){
-            if(!owned->alive||!owned->native||!owned->native->nativeAlive||owned->native->nativeTerminated)continue;
-            ++liveARAOwners;if(!currentNativeCacheGenerationCoherent(*owned))renderReady=false;
-        }
-        pollHeadlessNativeExport(renderReady&&liveARAOwners>0);
+        pollHeadlessNativeExport(false); // Observe only; real CLI owns export timing.
 
     }catch(const std::exception& e){rt.error=e.what();writeNativeApplicationEvent("ara_app_bridge_tick_refused",e.what());status();}
     catch(...){rt.error="Unknown native SDK exception in app bridge";writeNativeApplicationEvent("ara_app_bridge_tick_refused",rt.error);}
@@ -1450,9 +1445,15 @@ void onAdmitted(const NativeApplication& app,void*)noexcept{
         config.callbacks.beforeTerminate=beforeTerminate;config.callbacks.terminated=terminated;config.callbacks.fault=fault;
         config.callbacks.controllerHandlerObserved=controllerHandlerObserved;config.callbacks.paramEditObserved=parameterEdit;config.callbacks.paramNormalizedObserved=parameterNormalized;config.callbacks.inputParameterChangesObserved=inputParameterChanges;
         if(rt.observeNativeDSP)config.callbacks.nativeProcessTelemetry=nativeProcessTelemetry;
-        const auto result=hooks::install(config);rt.hooksInstalled=result.installed;demand(result.installed,result.reason);status();
+        const auto result=hooks::install(config);rt.hooksInstalled=result.installed;demand(result.installed,result.reason);status();pollHeadlessNativeExport(false);
     }catch(const std::exception& e){runtime().error=e.what();writeNativeApplicationEvent("ara_app_helper_install_failed",e.what());}
     catch(...){runtime().error="Unknown exception installing native bridge";writeNativeApplicationEvent("ara_app_helper_install_failed",runtime().error);}
+}
+void onNativeCreationReturned(const NativeApplication&,int result,void*)noexcept{
+    // Established normal engine return boundary, before OsxFL can exit. Own
+    // source counters survive per-component teardown in the overlay controls.
+    try{status();}catch(...){writeNativeApplicationEvent("native_cli_final_status_unavailable");}
+    observeHeadlessNativeBatchReturn(result);
 }
 bool beforeOriginalCreate(const NativeApplication& app,void*)noexcept{
     try{auto& rt=runtime();
@@ -1470,7 +1471,7 @@ bool beforeOriginalCreate(const NativeApplication& app,void*)noexcept{
     catch(...){return false;}
 }
 __attribute__((constructor)) static void loadBridge(){
-    @autoreleasepool{NativeApplicationCallbacks callbacks;callbacks.admitted=onAdmitted;callbacks.beforeOriginalCreate=beforeOriginalCreate;callbacks.tick=tick;
+    @autoreleasepool{NativeApplicationCallbacks callbacks;callbacks.admitted=onAdmitted;callbacks.beforeOriginalCreate=beforeOriginalCreate;callbacks.tick=tick;callbacks.creationReturned=onNativeCreationReturned;
         const bool initialized=initializeNativeApplication(callbacks);
         if(!initialized&&nativeApplication().startupOwnershipVerified)_exit(78);}
 }

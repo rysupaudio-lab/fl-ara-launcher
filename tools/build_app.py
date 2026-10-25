@@ -30,6 +30,12 @@ if app.exists(): shutil.rmtree(app)
 resources=app/'Contents/Resources'; native=resources/'native'; macos=app/'Contents/MacOS'
 native.mkdir(parents=True); macos.mkdir(parents=True)
 shutil.copy2(helper,native/'FLAppBridge.dylib')
+rate_hold=native/'RysUpRateHold.dylib'
+subprocess.run(['xcrun','clang','-dynamiclib','-arch','arm64','-O2','-mmacosx-version-min=15.4',
+                '-install_name','@rpath/RysUpRateHold.dylib','-framework','CoreAudio','-framework','AudioToolbox',
+                str(root/'native/RysUpRateHold.c'),'-o',str(rate_hold)],check=True,env=build_env)
+subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(rate_hold)],check=True)
+subprocess.run(['/usr/bin/codesign','--verify','--strict',str(rate_hold)],check=True)
 public_manifest=sanitized_manifest(manifest,native/'FLAppBridge.dylib',root)
 (native/'helper.json').write_text(json.dumps(public_manifest,indent=2)+'\n')
 (out/'app-build.json').write_text(json.dumps({'source_revision':public_manifest['source_revision'],'compiled_helper_sha256':digest,'public_manifest_sha256':hashlib.sha256((native/'helper.json').read_bytes()).hexdigest()},indent=2)+'\n')

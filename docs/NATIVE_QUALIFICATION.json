@@ -1,0 +1,128 @@
+{
+  "schema": "rysup.fl-ara-known-profile-qualification/1",
+  "release": "0.1.0-candidate.13",
+  "date": "2026-10-25",
+  "qualification_scope": "documented-known-profile",
+  "tested_source_revision": "e734d6d2a0a293200d7fe41574b1e16bac3c0bb9",
+  "environment": {
+    "architecture": "arm64",
+    "macos": "27.0",
+    "macos_build": "26A428",
+    "application_deployment_minimum": "15.4"
+  },
+  "host": {
+    "name": "FL Studio",
+    "version": "26.1.7.5421",
+    "other_builds": "refused"
+  },
+  "runtime_binary_sha256": {
+    "FLAppBridge.dylib": "a8c4307519bc878da9530a51289e462854eb49ef9685e7d56ea5d3e5109698c6",
+    "RysUpRateHold.dylib": "de6fcb5ad32b1c68a612d70e8c4cc0c207b4990bc1bcf5c491bd9515ce211c38",
+    "RysUpExportDriver.dylib": "c4e5f8c9da28a445eba09474e6735bbac7fe85427c33116937109a9af7288b88"
+  },
+  "export_pipeline": {
+    "native_command": "-R -Ewav <owned saved project> -O<owned output directory>",
+    "existing_export_driver_source_revision": "daw-converter 14fe69aa",
+    "ara_preparation": "genuine native loader-return boundary",
+    "vendor_instructions_or_files_modified": false,
+    "rate_hold": "existing RysUpRateHold source",
+    "headless_device_profile": "built-in devices already at 48 kHz; input disabled; no system-default changes requested"
+  },
+  "cold_export_acceptance": {
+    "schema": "rysup.fl-native-batch-three-cold-runs/1",
+    "pass": true,
+    "runs": 3,
+    "sha256": "bb4dbd79580ddfd86e097e6be1eaaca7e09f1670d0d199c4a040cda2ec998047",
+    "sample_identical": true,
+    "file_identical": true,
+    "sample_rate": 48000,
+    "sample_format": "FLOAT",
+    "frames": 276000,
+    "channels": 2,
+    "activity_matches_control": true,
+    "control_is_ara_processed_reference": false,
+    "normal_exit_each_run": true,
+    "no_user_UI_actions_in_verified_runs": true,
+    "input_sha256": "62da4f3671bc4342197593062e9248ddc64dc901fae8ed4f8b2c9d9c38964462"
+  },
+  "nonzero_values_per_half_second": [
+    47996,
+    47994,
+    47998,
+    47994,
+    28,
+    0,
+    47995,
+    47997,
+    960,
+    0,
+    47997,
+    23999
+  ],
+  "stock_control": {
+    "sha256": "843103458b6a5fb3c972efb13ca244027ea583f9c50a352b1ef8ce6d2e98f562",
+    "purpose": "format and arrangement activity only",
+    "is_ara_processed_reference": false
+  },
+  "plugins": [
+    {
+      "name": "autochoir",
+      "vendor": "offwhite",
+      "version": "1.0.0",
+      "format": "VST3",
+      "observed": [
+        "genuine ARA 2 binding",
+        "six full/cropped/reused mono/stereo clips",
+        "native project save with two ARA/state envelopes (candidate11)",
+        "paired Formant+5 ordinary state stored",
+        "three independent candidate13 saved-project exports with identical file/PCM data and normal exits"
+      ],
+      "not_proven": [
+        "audible Formant DSP change against an independent ARA-processed reference",
+        "every editor operation or parameter automation"
+      ]
+    },
+    {
+      "name": "Melodyne",
+      "vendor": "Celemony",
+      "version": "5.4.2",
+      "format": "VST3",
+      "evidence_build": "candidate12 before batch-adapter repair",
+      "observed": [
+        "genuine ARA binding",
+        "six-clip default-state native export",
+        "owned native project save on normal Quit"
+      ],
+      "not_proven": [
+        "editing compatibility",
+        "cold recall",
+        "independent processed-audio parity"
+      ]
+    }
+  ],
+  "supported_audio_profile": {
+    "source_sample_rate": 48000,
+    "source_format": "resident PCM16 mono/stereo",
+    "one_ara_effect_per_insert": true,
+    "ara_effect_position": "first",
+    "source_stretching": false,
+    "source_rate_conversion": false,
+    "plugin_latency_or_tail": false
+  },
+  "preservation": {
+    "checked_files": 11,
+    "all_unchanged": true,
+    "vendor_deep_signature_valid": true
+  },
+  "process_cleanup": {
+    "all_verified_runs_exited_normally": true,
+    "owned_test_processes_remaining": 0
+  },
+  "limits": [
+    "Experimental prerelease; no universal ARA conformance or vendor certification claim",
+    "Other FL builds, Intel, Windows and untested macOS versions are not qualified",
+    "Patched projects must be reopened/saved through this launcher; unpatched FL may discard extended state",
+    "Internal batch return hook qualifies ordinary raw-LR arm64 loader returns, not arbitrary C++ unwinding",
+    "Stock control is not an ARA-processed audio reference; DSP/editor parity is not established"
+  ]
+}

@@ -15,6 +15,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--app", type=Path, default=root / "dist/FL ARA Launcher.app")
 parser.add_argument("--output", type=Path, default=root / "dist/packages")
 parser.add_argument("--identity", help="Developer ID Application signing identity; omit for an ad-hoc test package")
+parser.add_argument("--preserve-runtime-signatures", action="store_true", help="Verify sealed nested runtime signatures and preserve their exact tested bytes; sign only the outer app and DMG")
 parser.add_argument("--name", default="FL ARA Launcher")
 parser.add_argument("--version", default="0.1.0-candidate.1")
 parser.add_argument("--stem", default="FL-ARA-Launcher-0.1.0-candidate.1-arm64")
@@ -44,21 +45,30 @@ rate_hold=helper.parent / "RysUpRateHold.dylib"
 if (not rate_hold.is_file() or rate_hold.is_symlink() or not rate_hold.is_relative_to(app)
         or manifest.get("rate_hold_sha256") != hashlib.sha256(rate_hold.read_bytes()).hexdigest()):
     raise ValueError("Rate-hold companion is absent or differs from its sealed build")
-run("/usr/bin/codesign", "--verify", "--strict", rate_hold)
-run(*sign, rate_hold)
-run("/usr/bin/codesign", "--verify", "--strict", rate_hold)
 export_driver=helper.parent / "RysUpExportDriver.dylib"
 if (not export_driver.is_file() or export_driver.is_symlink() or not export_driver.is_relative_to(app)
         or manifest.get("export_driver_sha256") != hashlib.sha256(export_driver.read_bytes()).hexdigest()):
     raise ValueError("Export-driver companion is absent or differs from its sealed build")
-run("/usr/bin/codesign", "--verify", "--strict", export_driver)
-run(*sign, export_driver)
-run("/usr/bin/codesign", "--verify", "--strict", export_driver)
-run(*sign, helper)
+runtime_files=[helper,rate_hold,export_driver]
+runtime_seals={path:hashlib.sha256(path.read_bytes()).hexdigest() for path in runtime_files}
+for path in runtime_files:
+    run("/usr/bin/codesign", "--verify", "--strict", path)
+if not args.preserve_runtime_signatures:
+    for path in (rate_hold,export_driver,helper):
+        run(*sign,path)
+        run("/usr/bin/codesign", "--verify", "--strict", path)
 manifest = sanitized_manifest(manifest,helper,root)
 manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 run(*sign, app)
 run("/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", app)
+if args.preserve_runtime_signatures and any(hashlib.sha256(path.read_bytes()).hexdigest()!=seal for path,seal in runtime_seals.items()):
+    raise ValueError("Outer signing changed sealed tested runtime bytes")
+qualification_complete=(all(manifest.get(field) is True for field in ("normal_app_integration_qualified","third_party_qualified","runtime_qualified"))
+                        and manifest.get("qualification_scope")=="documented-known-profile"
+                        and manifest.get("qualification_report")=="NATIVE_QUALIFICATION.json")
+qualification_text=("completed within the recorded experimental profile; see qualification report for exclusions"
+                    if qualification_complete else "pending completed normal-app, third-party and runtime profile evidence")
+
 stem = args.stem
 if Path(stem).name != stem or not stem:
     raise ValueError("--stem must be a single filename component")
@@ -80,7 +90,8 @@ with tempfile.TemporaryDirectory(prefix="fl-ara-package-", dir=out) as scratch:
         f"Uninstall: drag only {args.name}.app to Trash. Session diagnostics are in\n"
         f"~/Library/Caches/{args.cache_name}. Quit all launcher copies before cleaning its cache.\n\n"
         "This is an experimental candidate, independent of Image-Line and plugin vendors.\n"
-        "Compatibility testing is still in progress. It is not a qualified public release.\n"
+        + ("Runtime checks completed within the recorded experimental profile. See README and qualification notes for limitations.\n"
+           if qualification_complete else "Compatibility testing is still in progress. It is not a qualified public release.\n")
     )
     if manifest.get("runtime_admission_scope") == "bare-startup-test-only":
         instructions = (
@@ -128,9 +139,10 @@ if args.identity:
 with (app / "Contents/Info.plist").open("rb") as stream:
     app_info = plistlib.load(stream)
 files = [app / "Contents/MacOS" / app_info["CFBundleExecutable"], helper, rate_hold, export_driver, zip_path, dmg_path]
-receipt = {"schema": "ara-launcher-package/1", "name": args.name, "version": args.version, "architecture": "arm64", "minimum_macos": app_info.get("LSMinimumSystemVersion"), "python_runtime_required": False, "runtime_admission_scope": manifest.get("runtime_admission_scope", "integration-candidate"), "normal_app_integration_qualified": manifest.get("normal_app_integration_qualified", False), "third_party_qualified": manifest.get("third_party_qualified", False),
-           "signed": True, "signature_kind": "developer-id" if args.identity else "ad-hoc", "developer_id_signed": bool(args.identity), "notarized": False, "published": False, "qualification": "pending normal-app and third-party runtime checks",
+receipt = {"schema": "ara-launcher-package/1", "name": args.name, "version": args.version, "architecture": "arm64", "minimum_macos": app_info.get("LSMinimumSystemVersion"), "python_runtime_required": False, "runtime_admission_scope": manifest.get("runtime_admission_scope", "integration-candidate"), "normal_app_integration_qualified": manifest.get("normal_app_integration_qualified", False), "third_party_qualified": manifest.get("third_party_qualified", False), "runtime_qualified": manifest.get("runtime_qualified", False),
+           "signed": True, "signature_kind": "developer-id" if args.identity else "ad-hoc", "developer_id_signed": bool(args.identity), "notarized": False, "published": False, "qualification": qualification_text, "qualification_scope": manifest.get("qualification_scope", "unqualified-profile"), "profile": manifest.get("profile", {}), "runtime_signatures_preserved": args.preserve_runtime_signatures,
            "files": [{"path": (str(p.relative_to(app)) if p.is_relative_to(app) else p.name), "bytes": p.stat().st_size, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p in files]}
+if "qualification_report" in manifest:receipt["qualification_report"]=manifest["qualification_report"]
 for field in ("routing_only","device_start_fix","no_device_start_fix","audio_io_qualification","no_audio_io_qualification","retains_immutable_r5_device_start_guards","intended_runtime_scope","candidate_kind","device_start_admission_compiled","actual_audio_io_qualified","strong_process_admission_compiled","authority_only_internal_cache_invalidation_compiled","diagnostic_only","guard_logic_changed","native_save_unicode_compiled","native_slot_power_observer_compiled"):
     if field in manifest:receipt[field]=manifest[field]
 (out / f"{stem}.json").write_text(json.dumps(receipt, indent=2) + "\n")

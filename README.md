@@ -26,7 +26,9 @@ No Terminal commands, Python or developer tools are needed. Your ARA plugins mus
 | Source processing | No source stretching or source-rate conversion; no plugin latency or tail in this initial route |
 | Plugin evidence | Real autochoir 1.0.0 VST3 integration work; compatibility is plugin-specific |
 
-Candidate **0.1.0-candidate.12** contains the native-save, slot-bypass and ready-gated export integration. Its release notes must identify the exact completed runtime evidence; source compilation alone is not audio or recall qualification. This is an experimental release, not general ARA conformance or support for every plugin, DAW version or Mac.
+Candidate **0.1.0-candidate.13** includes native project saving and the genuine FL batch-render path with ARA preparation after project loading. Native saves retain both ordinary plugin state and genuine ARA archives; paired autochoir Formant values of +5 were saved. Three independent cold headless runs have played all six full/cropped/repeated mono/stereo clips, produced identical Float32 stereo 48 kHz audio (276000 frames), and exited normally with no private FL processes left running.
+
+**Audio-editing qualification remains limited.** The unpatched control is a rendering reference, not a processed ARA reference. Current comparisons do not establish an audible Formant DSP change. Melodyne 5.4.2 previously bound, rendered its default six-clip project and saved on quit; its editing and cold recall are unqualified. This is an experimental integration, not general ARA conformance or compatibility with every plugin, DAW version or Mac.
 
 Source caches prepare while playback is stopped. An ARA edit during playback can stop playback for preparation; restart playback explicitly after preparation completes.
 
@@ -57,12 +59,12 @@ Build the app with the exact helper and its matching manifest:
 /opt/homebrew/bin/python3.13 tools/package_app.py \
   --app '/path/build/FL ARA Launcher.app' --output /path/packages \
   --identity 'Developer ID Application: …' \
-  --version 0.1.0-candidate.12 --stem FL-ARA-Launcher-0.1.0-candidate.12-arm64
+  --version 0.1.0-candidate.13 --stem FL-ARA-Launcher-0.1.0-candidate.13-arm64
 ```
 
-The helper must be signed and hash-bound to a ready build manifest. Signing, notarization, runtime evidence and publication are separately recorded. See [candidate release preparation](docs/CANDIDATE_12_RELEASE.md).
+The helper must be signed and hash-bound to a ready build manifest. Signing, notarization, runtime evidence and publication are separately recorded. See [candidate release preparation](docs/CANDIDATE_13_RELEASE.md).
 
-The internal CLI also accepts `--headless-export BACKED_UP.flp` with normal physical-device mode. It opens the same private normal FL application, waits for current ARA preparation and writes only `export.wav` plus a result receipt inside its new owned run. It never saves or quits automatically. A result file or native Boolean alone is not an audio-compatibility claim. The native export may create its own render form; this route requires no computer-use gestures.
+The internal CLI accepts `--headless-export BACKED_UP.flp` for a disposable, read-only-source batch run. It uses FL’s real `-R` batch renderer, prepares ARA after the genuine project loader returns, and reuses the sealed converter RateHold and export driver from the control pipeline. Output and private diagnostics stay in the owned run. The existing driver waits for the output and quits the private FL copy normally; it can answer discard prompts for that disposable batch only. No computer-use gestures are needed. The normal launcher window/project-saving workflow above is unchanged.
 
 ## License
 

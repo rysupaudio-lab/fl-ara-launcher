@@ -14,6 +14,11 @@ def sanitized_manifest(raw, helper, root):
             'runtime_admission_scope':raw.get('runtime_admission_scope','owned-qualification-candidate')}
     if result['runtime_admission_scope'] not in {'bare-startup-test-only','owned-qualification-candidate','qualified-runtime'}:raise ValueError('Unrecognized runtime admission scope')
     for name in FLAGS:result[name]=raw.get(name) is True
+    if any(result[name] for name in FLAGS):
+        if raw.get('qualification_scope')!='documented-known-profile' or raw.get('qualification_report')!='NATIVE_QUALIFICATION.json':
+            raise ValueError('Qualified flags require the explicit documented profile/report')
+        result['qualification_scope']='documented-known-profile'
+        result['qualification_report']='NATIVE_QUALIFICATION.json'
     rate_hold=helper.parent/'RysUpRateHold.dylib'
     if rate_hold.exists() or 'rate_hold_sha256' in raw:
         if not rate_hold.is_file() or rate_hold.is_symlink():raise ValueError('Sealed rate-hold companion is missing or a symlink')

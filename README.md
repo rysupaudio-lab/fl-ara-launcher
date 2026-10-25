@@ -2,6 +2,8 @@
 
 An experimental ARA 2 integration for **FL Studio 2026 26.1.7.5421 on Apple Silicon Macs**. It runs your licensed FL Studio in a private application copy and keeps your installed FL application unchanged.
 
+**[Download the Mac installer (DMG)](https://github.com/rysupaudio-lab/fl-ara-launcher/releases/download/v0.1.0-candidate.13/FL-ARA-Launcher-0.1.0-candidate.13-arm64.dmg)** · [Release notes and checksums](https://github.com/rysupaudio-lab/fl-ara-launcher/releases/tag/v0.1.0-candidate.13)
+
 ## Install
 
 1. Download the **arm64 DMG** from this repository’s Releases page.

@@ -8,6 +8,7 @@
 #include "FLNativeEditorSetupCachePolicy.h"
 #include "FLNativeSlotPowerObserver.h"
 #include "FLHeadlessNativeExport.h"
+#include "FLNativeBatchLoadBoundary.h"
 #include <pluginterfaces/vst/ivstparameterchanges.h>
 #include "FLNativeSaveGuard.h"
 #include "RegistrationReadThrough.h"
@@ -478,6 +479,7 @@ std::optional<hooks::ClassID> araClassForActualComponent(hooks::InstanceRecord& 
     demand(found.has_value(),"actual same native factory lacks independent matching ARA provider");return found;
 }
 void initialized(hooks::InstanceRecord& n,void*,Steinberg::FUnknown* context,Steinberg::tresult result,const hooks::ThreadInfo& info,void*)noexcept{
+    if(info.isMainThread&&!info.insideNativeProcess)armNativeBatchLoadBoundaryAtCurrentCallback();
     observeLoadedNativeSlotPower(info);
     if(result==kResultOk&&info.isMainThread&&!info.insideNativeProcess)publishControllerAssociationOnMain(n);
     if(n.createdKind!=hooks::CreatedKind::Component||result!=kResultOk||!nativeApplicationAdmitted()||!n.actualComponent.load())return;
@@ -588,7 +590,7 @@ std::unique_ptr<const NativeParameterEchoSnapshot> captureCacheParameterEchoProo
     }catch(...){return {};}
     return proof;
 }
-void refreshAtBoundary(BridgeRecord& r,bool build){
+void refreshAtBoundary(BridgeRecord& r,bool build,bool typedPendingOnly=false){
     auto& rt=runtime();publishAllControllerAssociationsOnMain();auto snapshot=rt.coordinator->captureActualCurrentSnapshot(r.identity.instanceID);
     auto* power=r.nativeSlotPower.load();demand(nativeSlotPowerObserverReady()&&power&&r.nativeSlotPowerRegistered&&!power->closed(),"native slot-power binding is unavailable at model boundary");
     rt.overlay->associateNativeSlotPowerAtNativeBoundary(r.identity.instanceID,r.identity.actualComponent,*power);
@@ -596,7 +598,7 @@ void refreshAtBoundary(BridgeRecord& r,bool build){
     if(r.pendingArchive){
         // Pure current-RAM preflight precedes any potentially failing ARA action.
         try{rt.adapter->validateActualCurrentRAMForArchive(*r.pendingArchive,r.identity);}
-        catch(const std::exception& e){r.error=std::string("Waiting for matching native project RAM: ")+e.what();return;}
+        catch(const std::exception& e){if(typedPendingOnly)throw;r.error=std::string("Waiting for matching native project RAM: ")+e.what();return;}
         rt.coordinator->restoreArchiveBeforeOriginalState(r.identity.instanceID,*r.pendingArchive,*rt.adapter,
             lab::StandaloneArchiveApplication::ExistingBoundNativeProjectReplacement);
         r.pendingArchive.reset();r.pendingLoad={};r.error.clear();r.graphApplied=true;r.appliedGraph=snapshot.data().model.graphSHA256;r.appliedModel=currentModel;r.dirty=true;
@@ -805,6 +807,7 @@ BridgeRecord* exactNativeControllerOwner(hooks::InstanceRecord& n,const hooks::T
     publishControllerAssociationOnMain(n);return publishedControllerOwner(n,n.actualController.load());
 }
 Steinberg::tresult state(hooks::InstanceRecord& n,hooks::StateOperation operation,Steinberg::IBStream* stream,hooks::OriginalStateCall& original,const hooks::ThreadInfo& info,void*)noexcept{
+    if(info.isMainThread&&!info.insideNativeProcess)armNativeBatchLoadBoundaryAtCurrentCallback();
     if(!stream){markActiveNativeSaveFailedFromAnyThread();return kResultFalse;}
     if(headlessNativeExportInFlight())return kResultFalse;
     auto* r=record(n);
@@ -1299,8 +1302,65 @@ void drainNativeSlotPowerStop(BridgeRecord& r){
     if(wasPlaying){++r.nativeSlotPowerStopsVerified;runtime().nativeSlotPowerStopNoticeQueued=true;
         writeNativeApplicationEvent("actual_native_slot_power_unknown_stopped",r.identity.instanceID);}
 }
+// Called synchronously only in the genuine batch loader-return/export gap.
+// This reuses the same stopped/drained per-insert preparation as the normal
+// model tick. It grants no synthetic cache epoch or native lifecycle state.
+bool primeAllCurrentARAForNativeBatch(void*)noexcept{
+    auto& rt=runtime();
+    const auto refuse=[&](const std::string& message)noexcept{
+        try{rt.error="Native CLI ARA preparation refused: "+message;status();
+            writeNativeApplicationEvent("native_cli_ara_prime_failed",rt.error);}catch(...){}return false;
+    };
+    if(!pthread_main_np()||!nativeApplicationAdmitted())return refuse("owned main-thread admission unavailable");
+    if(rt.inTick||currentNativeSaveTransaction()||rt.nativeSaveFreeze)return refuse("model or native Save operation already active");
+    rt.inTick=true;struct Reset{bool& value;~Reset(){value=false;}}reset{rt.inTick};
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+    std::string pending="current native source preparation is pending";
+    try{for(;;){
+        if(std::chrono::steady_clock::now()>=deadline)return refuse("timed out waiting for "+pending);
+        try{
+            if(!refreshActualNativeApplication())throw lab::NativeModelBoundaryUnavailable("actual engine publication");
+            if(!stopped())throw lab::NativeModelBoundaryUnavailable("actual stopped transport");
+            demand(!rt.unsupportedOffMainARAInitializations.load()&&!rt.unboundArchiveRefusals.load()
+                &&!hasLiveProtectedNativeArchive(),"a native ARA component/archive is unbound or unsupported");
+            std::size_t live=0;
+            for(std::size_t index=0;index<rt.records.size();++index){auto& r=*rt.records[index];
+                if(!r.alive||!r.native||!r.native->nativeAlive||r.native->nativeTerminated)continue;
+                ++live;demand(!r.disabled&&!r.fault&&!r.teardown,"a current native ARA insert is disabled or faulted");
+                if(!r.setupQualified)throw lab::NativeModelBoundaryUnavailable("actual supported native setupProcessing");
+                // Always capture current RAM, even for a previously coherent
+                // insert: loader completion may have added later source rows.
+                try{
+                    Boundary boundary(r);ensureOverlayAtModelBoundary();refreshAtBoundary(r,true,true);
+                    rt.overlay->collectRetiredOnModelThread();
+                    const auto* power=r.nativeSlotPower.load(std::memory_order_acquire);
+                    if(!power||power->snapshotForBlock()==slot_power::Power::Unknown)
+                        throw lab::NativeModelBoundaryUnavailable("current native slot-power notification");
+                    if(!currentNativeCacheGenerationCoherent(r))throw lab::SourceCacheNotReady("current graph/archive/cache publication");
+                }catch(const lab::NativeModelBoundaryUnavailable&){if(!currentNativeCacheGenerationCoherent(r))r.dirty=true;throw;}
+                catch(const lab::SourceCacheNotReady&){r.dirty=true;throw;}
+            }
+            if(!live)throw lab::NativeModelBoundaryUnavailable("a current live native ARA owner");
+            // No run-loop pumping between this last validation and native
+            // continuation. A real concurrent edit still closes its own gate.
+            for(const auto& r:rt.records){
+                if(!r->alive||!r->native||!r->native->nativeAlive||r->native->nativeTerminated)continue;
+                if(!currentNativeCacheGenerationCoherent(*r))throw lab::SourceCacheNotReady("a changed current cache generation");
+            }
+            if(std::chrono::steady_clock::now()>=deadline)return refuse("preparation exceeded its deadline");
+            rt.error.clear();status();writeNativeApplicationEvent("native_cli_ara_prime_ready");return true;
+        }catch(const lab::NativeModelBoundaryUnavailable& e){pending=e.what();}
+        catch(const lab::SourceCacheNotReady& e){pending=e.what();}
+        // Existing SDK analysis/loader completions need the actual main queue.
+        // All per-insert Boundary objects are gone before pumping; rt.inTick
+        // prevents this bridge's timer from reentering model work.
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.01,true);
+    }}catch(const std::exception& e){return refuse(e.what());}
+    catch(...){return refuse("unknown native SDK/model failure");}
+}
 void tick(const NativeApplication& app,void*)noexcept{
     if(!pthread_main_np()||!nativeApplicationAdmitted())return;
+    if(runtime().inTick)return;
     if(headlessNativeExportInFlight())return; // Native export may pump a nested run loop.
     pollNativeSaveGuardTransactions();
     // A vendor may pump a nested run loop while its native Save frame owns a
@@ -1450,6 +1510,7 @@ void onAdmitted(const NativeApplication& app,void*)noexcept{
     catch(...){runtime().error="Unknown exception installing native bridge";writeNativeApplicationEvent("ara_app_helper_install_failed",runtime().error);}
 }
 void onNativeCreationReturned(const NativeApplication&,int result,void*)noexcept{
+    finishNativeBatchLoadBoundary();
     // Established normal engine return boundary, before OsxFL can exit. Own
     // source counters survive per-component teardown in the overlay controls.
     try{status();}catch(...){writeNativeApplicationEvent("native_cli_final_status_unavailable");}
@@ -1466,6 +1527,9 @@ bool beforeOriginalCreate(const NativeApplication& app,void*)noexcept{
         rt.nativeSaveGuardInitialized=initializeNativeSaveGuard(saveCallbacks);
         demand(rt.nativeSaveGuardInitialized&&nativeSaveGuardReady(),
             "required native project-save startup protection is unavailable");
+        const char* batch=getenv("RYSUP_FLARA_BATCH_EXPORT");
+        if(batch&&!std::strcmp(batch,"1"))
+            demand(configureNativeBatchLoadBoundary(primeAllCurrentARAForNativeBatch,nullptr),"native CLI after-loader boundary configuration unavailable");
         writeNativeApplicationEvent("native_project_save_startup_guard_ready");return true;
     }catch(const std::exception& e){runtime().error=e.what();writeNativeApplicationEvent("native_project_save_startup_guard_unavailable",e.what());return false;}
     catch(...){return false;}

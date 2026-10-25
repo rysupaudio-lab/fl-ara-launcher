@@ -1,6 +1,7 @@
 // Native app and CLI: no Python, compiler or Apple binaries in the distribution.
 import AppKit
 import AudioToolbox
+import CoreAudio
 import CryptoKit
 import Darwin
 import CoreServices
@@ -100,6 +101,33 @@ func batchRenderSettingsXML() throws -> String {
     let values = reader.values.keys.sorted().map { "<Value Name=\"\($0)\" Type=\"2\">\(reader.values[$0]!)</Value>" }.joined()
     return "<Key Name=\"General\"><Key Name=\"WAVRenderForm\">\(values)</Key></Key>"
 }
+func batchAudioDeviceNames() throws -> (input: String, output: String) {
+    var property = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDevices, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+    var bytes: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &property, 0, nil, &bytes) == noErr,
+          bytes > 0, bytes < 65536 else { throw fail("Cannot inspect audio devices for the isolated batch profile.") }
+    var devices = [AudioDeviceID](repeating: 0, count: Int(bytes) / MemoryLayout<AudioDeviceID>.size)
+    let read = devices.withUnsafeMutableBytes { AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &property, 0, nil, &bytes, $0.baseAddress!) }
+    guard read == noErr else { throw fail("Cannot read the isolated batch audio devices.") }
+    func string(_ device: AudioDeviceID, _ selector: AudioObjectPropertySelector) -> String? {
+        var address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var value: CFString?; var size = UInt32(MemoryLayout<CFString?>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr else { return nil }
+        return value as String?
+    }
+    var input: String?, output: String?
+    for device in devices {
+        guard let uid = string(device, kAudioDevicePropertyDeviceUID),
+              ["BuiltInMicrophoneDevice", "BuiltInSpeakerDevice", "BuiltInOutputDevice"].contains(uid),
+              let name = string(device, kAudioObjectPropertyName) else { continue }
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyNominalSampleRate, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var rate: Float64 = 0; var size = UInt32(MemoryLayout<Float64>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &rate) == noErr, rate == 48000 else { continue }
+        if uid == "BuiltInMicrophoneDevice" { input = name } else { output = name }
+    }
+    guard let input, let output else { throw fail("The internal headless profile needs built-in input/output already running at 48 kHz. No device or system setting was changed.") }
+    return (input, output)
+}
 func verifyNativeBatchOutput(run: URL, runID: String, pid: Int32) throws -> [String: Any] {
     let resultURL = run.appendingPathComponent("headless-export-result.json")
     guard var result = try JSONSerialization.jsonObject(with: Data(contentsOf: resultURL)) as? [String: Any],
@@ -143,6 +171,23 @@ func verifyNativeBatchOutput(run: URL, runID: String, pid: Int32) throws -> [Str
                   "frames": frames, "output_sha256": try digest(output)]) { _, new in new }
     try jsonWrite(result, resultURL); return result
 }
+func prepareNativeExportDriver(run: URL, runID: String, output: URL) throws -> URL {
+    let root = URL(fileURLWithPath: "/private/tmp/rysup-daw-export")
+    try rejectSymlinkAncestors(root)
+    try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    let directory = root.appendingPathComponent("com.image-line.flstudio.slot\(getpid())")
+    guard !fm.fileExists(atPath: directory.path) else { throw fail("The isolated export-driver slot already exists; no existing job was reused.") }
+    try fm.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+    let request: [String: Any] = ["bundle_id": "com.image-line.flstudio", "id": runID, "timeout": 1200, "stay_hidden": true,
+        "answer": [["name": "Owned batch device notice", "text": "suitable CoreAudio device", "press": "^OK$"],
+                   ["name": "Disposable batch copy quit", "class": "^CustomWindow$", "title": "^Confirm$", "bare": true,
+                    "click": ["x": 138, "y": 154, "direct": true]]],
+        "steps": [["wait_file": output.path, "timeout": 1200], ["quit": true]]]
+    try jsonWrite(request, directory.appendingPathComponent("request.json"))
+    try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: directory.appendingPathComponent("request.json").path)
+    try jsonWrite(["run_id": runID, "launcher_pid": getpid(), "project_is_noninteractive_saved_input": true], directory.appendingPathComponent("owner.json"))
+    return directory
+}
 func preparePrivateHome(_ home: URL, tmp: URL, userData: URL, testDevice: String? = nil, batchExport: Bool = false) throws {
     for folder in [home, tmp, userData, home.appendingPathComponent("Library/Preferences/Image-Line"), home.appendingPathComponent("Library/Application Support"), home.appendingPathComponent("Documents"), home.appendingPathComponent("Desktop")] {
         try rejectSymlinkAncestors(folder)
@@ -150,8 +195,10 @@ func preparePrivateHome(_ home: URL, tmp: URL, userData: URL, testDevice: String
     }
     // Deliberately synthesize only path settings. Never read or duplicate license keys,
     // the original Image-Line registry, whole home folders or write-through symlinks.
-    let device = testDevice == nil && !batchExport ? "" : "<Value Name=\"Device name\" Type=\"2\">4Pro Tools Audio Bridge 2-A</Value>"
-    let input = batchExport ? "<Key Name=\"Audio Input\">\(device)</Key>" : ""
+    let batchAudio: (input: String, output: String)? = batchExport ? try batchAudioDeviceNames() : nil
+    let device = batchAudio.map { "<Value Name=\"Device name\" Type=\"2\">4\(xmlEscape($0.output))</Value>" }
+        ?? (testDevice == nil ? "" : "<Value Name=\"Device name\" Type=\"2\">4Pro Tools Audio Bridge 2-A</Value>")
+    let input = batchAudio.map { "<Key Name=\"Audio Input\"><Value Name=\"Device name\" Type=\"2\">4\(xmlEscape($0.input))</Value></Key>" } ?? ""
     let render = batchExport ? try batchRenderSettingsXML() : ""
     let inputDisabled = batchExport ? "<Key Name=\"DSTITF\"><Value Name=\"InputDisabled\" Type=\"2\">1</Value></Key>" : ""
     let audio = "<Key Name=\"FL Studio 26\"><Key Name=\"Devices\"><Key Name=\"Audio output\"><Value Name=\"Sample rate\" Type=\"2\">48000</Value>\(device)</Key>\(input)</Key>\(render)\(inputDisabled)</Key>"
@@ -194,11 +241,12 @@ func sandboxLiteral(_ path: String) throws -> String {
     guard !path.contains("\n"), !path.contains("\r"), !path.contains("\0") else { throw fail("Unsupported control character in protected path.") }
     return "\"" + path.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"") + "\""
 }
-func prepareSandbox(_ run: URL, source: URL, normalData: URL) throws -> (URL, URL) {
+func prepareSandbox(_ run: URL, source: URL, normalData: URL, readOnlyProject: URL? = nil) throws -> (URL, URL) {
     guard fm.isExecutableFile(atPath: "/usr/bin/sandbox-exec") else { throw fail("Required child-only write sandbox is unavailable.") }
     let home = fm.homeDirectoryForCurrentUser
     var protected = [source, home.appendingPathComponent("Library/Preferences/Image-Line"), normalData,
                      URL(fileURLWithPath: "/Library/Audio/Plug-Ins"), home.appendingPathComponent("Library/Audio/Plug-Ins")]
+    if let readOnlyProject { protected.append(canonical(readOnlyProject)) }
     let preferences = home.appendingPathComponent("Library/Preferences")
     if let entries = try? fm.contentsOfDirectory(at: preferences, includingPropertiesForKeys: nil) {
         protected += entries.filter { $0.lastPathComponent.hasPrefix("com.image-line.") }
@@ -215,7 +263,7 @@ func prepareSandbox(_ run: URL, source: URL, normalData: URL) throws -> (URL, UR
     let paths = try protected.map { "(subpath " + (try sandboxLiteral(physicalPath($0))) + ")" }.joined(separator: " ")
     let profile = run.appendingPathComponent("write-sandbox.sb"), trampoline = run.appendingPathComponent("exec-private-fl.sh")
     try Data(("(version 1) (allow default) (deny file-write* (require-any " + paths + "))\n").utf8).write(to: profile, options: .atomic)
-    try Data("#!/bin/sh\nset -eu\nif [ \"${RYSUP_FLARA_BATCH_EXPORT:-0}\" = 1 ]; then\nexport DYLD_INSERT_LIBRARIES=\"$RYSUP_FLARA_HELPER_PATH:$RYSUP_FLARA_RATE_HOLD_PATH\"\nelse\nexport DYLD_INSERT_LIBRARIES=\"$RYSUP_FLARA_HELPER_PATH\"\nfi\nexec \"$RYSUP_FLARA_EXPECTED_EXE\" \"$@\"\n".utf8).write(to: trampoline, options: .atomic)
+    try Data("#!/bin/sh\nset -eu\nif [ \"${RYSUP_FLARA_BATCH_EXPORT:-0}\" = 1 ]; then\nexport DYLD_INSERT_LIBRARIES=\"$RYSUP_FLARA_HELPER_PATH:$RYSUP_FLARA_RATE_HOLD_PATH:$RYSUP_FLARA_EXPORT_DRIVER_PATH\"\nelse\nexport DYLD_INSERT_LIBRARIES=\"$RYSUP_FLARA_HELPER_PATH\"\nfi\nexec \"$RYSUP_FLARA_EXPECTED_EXE\" \"$@\"\n".utf8).write(to: trampoline, options: .atomic)
     for item in [profile, trampoline] { try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: item.path) }
     return (profile, trampoline)
 }
@@ -429,10 +477,14 @@ final class Session {
         guard fm.fileExists(atPath: helper.path), !helper.path.contains(":") else { throw fail("The bundled native bridge is missing or its path contains a colon.") }
         let helperHash = try digest(helper)
         let rateHold = helper.deletingLastPathComponent().appendingPathComponent("RysUpRateHold.dylib")
+        let exportDriver = helper.deletingLastPathComponent().appendingPathComponent("RysUpExportDriver.dylib")
         if headlessExport {
             guard !rateHold.path.contains(":"), canonical(rateHold) == rateHold,
                   admission["rate_hold_sha256"] as? String == (try digest(rateHold)) else { throw fail("The bundled rate-hold companion is missing or unsealed.") }
             try command("/usr/bin/codesign", ["--verify", "--strict", rateHold.path])
+            guard !exportDriver.path.contains(":"), canonical(exportDriver) == exportDriver,
+                  admission["export_driver_sha256"] as? String == (try digest(exportDriver)) else { throw fail("The bundled native export driver is missing or unsealed.") }
+            try command("/usr/bin/codesign", ["--verify", "--strict", exportDriver.path])
         }
         let normalData = try normalUserDataPath()
         if let project { guard project.pathExtension == "flp", fm.fileExists(atPath: project.path) else { throw fail("Choose an existing, backed-up .flp project.") } }
@@ -451,6 +503,7 @@ final class Session {
                        "owned_app": app.path, "original_flp_handler": originalHandler as Any? ?? NSNull(), "normal_user_data_protected": normalData.path, "mode": testDevice == nil ? "normal" : "test", "project": project?.path as Any? ?? NSNull(), "helper_sha256": helperHash, "status": "preparing"]) { _, new in new }
         var operationError: Error?
         var nativeStartupConfirmed = false
+        var driverDirectory: URL?
         do {
             if headlessExport, let project {
                 receipt["headless_export_requested"] = true
@@ -462,6 +515,8 @@ final class Session {
                                "project": project.path, "project_sha256": try digest(project),
                                "output": output.path], run.appendingPathComponent("headless-export-request.json"))
                 try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: run.appendingPathComponent("headless-export-request.json").path)
+                driverDirectory = try prepareNativeExportDriver(run: run, runID: runID, output: output)
+                receipt["native_export_driver_directory"] = driverDirectory!.path
             }
             try jsonWrite(receipt, manifest)
             try jsonWrite(["launcher_pid": getpid(), "session": manifest.path], lock.appendingPathComponent("owner.json"))
@@ -474,7 +529,7 @@ final class Session {
             let home = run.appendingPathComponent("home"), tmp = run.appendingPathComponent("tmp")
             let userData = run.appendingPathComponent("user-data")
             try preparePrivateHome(home, tmp: tmp, userData: userData, testDevice: testDevice, batchExport: headlessExport)
-            let (sandbox, trampoline) = try prepareSandbox(run, source: source, normalData: normalData)
+            let (sandbox, trampoline) = try prepareSandbox(run, source: source, normalData: normalData, readOnlyProject: headlessExport ? project : nil)
             var env = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("DYLD_") && !$0.key.hasPrefix("RYSUP_") && $0.key != "CFFIXED_USER_HOME" }
             env.merge(["RYSUP_FLARA_HELPER_PATH": helper.path, "RYSUP_FLARA_HELPER_MANIFEST": helper.deletingLastPathComponent().appendingPathComponent("helper.json").path,
                        "RYSUP_FLARA_SESSION_MANIFEST": manifest.path, "RYSUP_FLARA_EXPECTED_HELPER_SHA256": helperHash, "CFFIXED_USER_HOME": home.path, "TMPDIR": tmp.path,
@@ -487,6 +542,8 @@ final class Session {
             if headlessExport, let project {
                 env["RYSUP_FLARA_BATCH_EXPORT"] = "1"
                 env["RYSUP_FLARA_RATE_HOLD_PATH"] = rateHold.path
+                env["RYSUP_FLARA_EXPORT_DRIVER_PATH"] = exportDriver.path
+                env["RYSUP_EXPORT_SLOT"] = String(getpid())
                 env["RYSUP_ENGINE_RATE"] = "48000"
                 env["RYSUP_RATE_HOLD_LOG"] = run.appendingPathComponent("rate-hold.log").path
                 nativeArguments = ["-R", "-Ewav", project.path, "-O" + run.appendingPathComponent("export").path]
@@ -540,7 +597,27 @@ final class Session {
             }
             if headlessExport {
                 guard task.exitStatusObserved, task.terminationStatus == 0 else { throw fail("Native batch exited unsuccessfully; diagnostics and output are preserved.") }
+                if let driverDirectory {
+                    let doneURL = driverDirectory.appendingPathComponent("done.json")
+                    guard let done = try JSONSerialization.jsonObject(with: Data(contentsOf: doneURL)) as? [String: Any],
+                          done["status"] as? String == "ok", done["pid"] as? Int32 == task.processIdentifier else {
+                        throw fail("The existing native export driver did not finish its matching owned recipe.")
+                    }
+                    let diagnostics = run.appendingPathComponent("export-driver")
+                    try fm.createDirectory(at: diagnostics, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                    for name in ["done.json", "log.txt", "written.txt", "request.working.json"] {
+                        let file = driverDirectory.appendingPathComponent(name)
+                        if fm.fileExists(atPath: file.path) { try fm.copyItem(at: file, to: diagnostics.appendingPathComponent(name)) }
+                    }
+                }
                 receipt["native_batch_output"] = try verifyNativeBatchOutput(run: run, runID: runID, pid: task.processIdentifier)
+                if let driverDirectory {
+                    let owner = try JSONSerialization.jsonObject(with: Data(contentsOf: driverDirectory.appendingPathComponent("owner.json"))) as? [String: Any]
+                    guard owner?["run_id"] as? String == runID, owner?["launcher_pid"] as? Int32 == getpid() else { throw fail("Export-driver cleanup ownership changed; directory preserved.") }
+                    try rejectSymlinkAncestors(driverDirectory)
+                    try fm.removeItem(at: driverDirectory)
+                    receipt["native_export_driver_cleaned"] = true
+                }
             }
             receipt["status"] = "exited"
         } catch {

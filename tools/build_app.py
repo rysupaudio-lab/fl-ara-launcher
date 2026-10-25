@@ -36,6 +36,13 @@ subprocess.run(['xcrun','clang','-dynamiclib','-arch','arm64','-O2','-mmacosx-ve
                 str(root/'native/RysUpRateHold.c'),'-o',str(rate_hold)],check=True,env=build_env)
 subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(rate_hold)],check=True)
 subprocess.run(['/usr/bin/codesign','--verify','--strict',str(rate_hold)],check=True)
+export_driver=native/'RysUpExportDriver.dylib'
+subprocess.run(['xcrun','clang','-dynamiclib','-fobjc-arc','-arch','arm64','-mmacosx-version-min=15.4',
+                '-install_name','@rpath/RysUpExportDriver.dylib','-framework','Foundation','-framework','AppKit',
+                '-framework','QuartzCore','-framework','Metal','-framework','Vision',
+                str(root/'native/RysUpExportDriver.m'),'-o',str(export_driver)],check=True,env=build_env)
+subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(export_driver)],check=True)
+subprocess.run(['/usr/bin/codesign','--verify','--strict',str(export_driver)],check=True)
 public_manifest=sanitized_manifest(manifest,native/'FLAppBridge.dylib',root)
 (native/'helper.json').write_text(json.dumps(public_manifest,indent=2)+'\n')
 (out/'app-build.json').write_text(json.dumps({'source_revision':public_manifest['source_revision'],'compiled_helper_sha256':digest,'public_manifest_sha256':hashlib.sha256((native/'helper.json').read_bytes()).hexdigest()},indent=2)+'\n')

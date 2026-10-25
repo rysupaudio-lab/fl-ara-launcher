@@ -20,6 +20,12 @@ def sanitized_manifest(raw, helper, root):
         if 'rate_hold_sha256' in raw and (not isinstance(raw['rate_hold_sha256'],str) or not re.fullmatch('[0-9a-f]{64}',raw['rate_hold_sha256'])):
             raise ValueError('Invalid rate-hold companion seal')
         result['rate_hold_sha256']=hashlib.sha256(rate_hold.read_bytes()).hexdigest()
+    export_driver=helper.parent/'RysUpExportDriver.dylib'
+    if export_driver.exists() or 'export_driver_sha256' in raw:
+        if not export_driver.is_file() or export_driver.is_symlink():raise ValueError('Sealed export-driver companion is missing or a symlink')
+        if 'export_driver_sha256' in raw and (not isinstance(raw['export_driver_sha256'],str) or not re.fullmatch('[0-9a-f]{64}',raw['export_driver_sha256'])):
+            raise ValueError('Invalid export-driver companion seal')
+        result['export_driver_sha256']=hashlib.sha256(export_driver.read_bytes()).hexdigest()
     if 'routing_only' in raw and not isinstance(raw['routing_only'],bool):raise ValueError('Expected boolean routing-only scope')
     if raw.get('routing_only') is True:
         restrictions={'routing_only':True,'device_start_fix':False,'no_device_start_fix':True,
@@ -80,6 +86,17 @@ def sanitized_manifest(raw, helper, root):
         seal=hashlib.sha256(rate_source.read_bytes()).hexdigest()
         if hashes.get('native/RysUpRateHold.c',seal)!=seal:raise ValueError('Rate-hold source differs from its manifest seal')
         hashes['native/RysUpRateHold.c']=seal
+    driver_source=root/'native/RysUpExportDriver.m'
+    if 'export_driver_sha256' in result:
+        if not driver_source.is_file() or driver_source.is_symlink():raise ValueError('Export-driver source is missing or a symlink')
+        seal=hashlib.sha256(driver_source.read_bytes()).hexdigest()
+        if hashes.get('native/RysUpExportDriver.m',seal)!=seal:raise ValueError('Export-driver source differs from its manifest seal')
+        hashes['native/RysUpExportDriver.m']=seal
+        menu_source=root/'native/RysUpMenuNavigation.h'
+        if not menu_source.is_file() or menu_source.is_symlink():raise ValueError('Export-driver menu source is missing or a symlink')
+        menu_seal=hashlib.sha256(menu_source.read_bytes()).hexdigest()
+        if hashes.get('native/RysUpMenuNavigation.h',menu_seal)!=menu_seal:raise ValueError('Export-driver menu source differs from its manifest seal')
+        hashes['native/RysUpMenuNavigation.h']=menu_seal
     result['input_relative_hashes']=hashes
     # Public build profile is explicit and contains no arbitrary compile-manifest strings.
     result['profile']={'architecture':'arm64','minimum_macos':'15.4','fl_version':'26.1.7.5421','initial_sample_rate':48000,

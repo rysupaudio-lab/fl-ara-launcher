@@ -90,6 +90,15 @@ with tempfile.TemporaryDirectory(prefix="fl-ara-package-", dir=out) as scratch:
             "with an owned backed-up .flp project and the virtual test device.\n"
             "Do not copy this candidate over an installed FL or plugin.\n"
         )
+    elif manifest.get("candidate_kind") == "full-compiled-device-gate-unqualified":
+        instructions = (
+            "OWNER-LOCAL DEVICE-GATE QUALIFICATION CANDIDATE. NOT A PUBLIC INSTALLER.\n\n"
+            "The native device-start admission gate is compiled into this candidate.\n"
+            "Actual normal-app, third-party and audio I/O qualification remain false.\n"
+            "Use only the integration owner's command with an owned backed-up .flp\n"
+            "project, exact --fl and --cache-root paths, and the virtual test device.\n"
+            "Do not copy this candidate over an installed FL or plugin.\n"
+        )
     else:
         instructions = ordinary_instructions
     (staging / "Install and start.txt").write_text(instructions)
@@ -102,7 +111,7 @@ files = [app / "Contents/MacOS" / app_info["CFBundleExecutable"], helper, zip_pa
 receipt = {"schema": "ara-launcher-package/1", "name": args.name, "version": args.version, "architecture": "arm64", "minimum_macos": app_info.get("LSMinimumSystemVersion"), "python_runtime_required": False, "runtime_admission_scope": manifest.get("runtime_admission_scope", "integration-candidate"), "normal_app_integration_qualified": manifest.get("normal_app_integration_qualified", False), "third_party_qualified": manifest.get("third_party_qualified", False),
            "signed": True, "signature_kind": "developer-id" if args.identity else "ad-hoc", "developer_id_signed": bool(args.identity), "notarized": False, "published": False, "qualification": "pending normal-app and third-party runtime checks",
            "files": [{"path": (str(p.relative_to(app)) if p.is_relative_to(app) else p.name), "bytes": p.stat().st_size, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p in files]}
-for field in ("routing_only","device_start_fix","no_device_start_fix","audio_io_qualification","no_audio_io_qualification","retains_immutable_r5_device_start_guards","intended_runtime_scope"):
+for field in ("routing_only","device_start_fix","no_device_start_fix","audio_io_qualification","no_audio_io_qualification","retains_immutable_r5_device_start_guards","intended_runtime_scope","candidate_kind","device_start_admission_compiled","actual_audio_io_qualified"):
     if field in manifest:receipt[field]=manifest[field]
 (out / f"{stem}.json").write_text(json.dumps(receipt, indent=2) + "\n")
 print(json.dumps(receipt, indent=2))

@@ -115,7 +115,7 @@ struct Runtime {
     std::string nativeSaveError;
     std::vector<std::unique_ptr<BridgeRecord>> records;
     std::atomic<bool> overlayFault{false},overlayStaleHoldQueued{false};bool nativeStopNoticeQueued=false;
-    bool hooksInstalled=false,overlayInstalled=false,inTick=false,anyBoundary=false,observeNativeDSP=false;
+    bool hooksInstalled=false,overlayInstalled=false,inTick=false,anyBoundary=false,observeNativeDSP=false,nativeReadyStatusPublished=false;
     std::string error;std::uint64_t ticks=0;
     BridgeRecord* byID(const std::string& id)const noexcept{
         for(auto* r=head.load();r;r=r->next.load())if(r->identity.instanceID==id)return r;return nullptr;
@@ -846,7 +846,7 @@ void parameterNormalized(hooks::InstanceRecord& n,Steinberg::Vst::IEditControlle
 void fault(const char*,const hooks::ModuleRecord*,const hooks::InstanceRecord* n,const hooks::ThreadInfo&,void*)noexcept{
     if(n)if(auto* r=static_cast<BridgeRecord*>(n->ownerData.load()))r->fault=true;
 }
-void status(){
+bool status(){
     auto& rt=runtime();const auto& app=nativeApplication();const auto cacheStats=rt.overlay?rt.overlay->instanceStatsOnModelThread():std::vector<lab::FLStandaloneOverlayInstanceStats>{};NSMutableArray* inserts=[NSMutableArray array];
     for(const auto& r:rt.records){NSMutableDictionary* d=[NSMutableDictionary dictionary];
         const auto* controller=r->currentControllerNode.load();
@@ -869,6 +869,8 @@ void status(){
         d[@"native_mix_trylock"]=@(r->lastNativeMixBoundary.tryLockResult);d[@"native_mix_unlock"]=@(r->lastNativeMixBoundary.unlockResult);
         d[@"native_mix_identity_verified"]=@(r->lastNativeMixBoundary.nativeIdentityVerified);d[@"native_process_admission_allowed"]=@(r->native->nativeProcessAllowed.load());
         d[@"native_process_admission_blocked_callbacks"]=@(r->native->blockedProcessCallbacks.load());
+        d[@"native_set_active_calls"]=@(r->native->activationCalls.load());d[@"native_set_processing_calls"]=@(r->native->processingCalls.load());
+        d[@"native_set_active_enabled"]=@(r->active.load());d[@"native_set_processing_enabled"]=@(r->processing.load());
         d[@"empty_lifecycle_bind_mix_diagnostic"]=@(nativeMixBoundaryReason(r->lifecycleBindingMixDiagnostic.reason));
         d[@"empty_lifecycle_bind_diagnostic_is_model_boundary_proof"]=@NO;
         d[@"prepared_ara_archive_available"]=@(r->preparedNativeSave.has_value());
@@ -928,6 +930,21 @@ void status(){
         @"input_info_status":@(callbackMetadata.inputInfoStatus),@"input_info_bytes":@(callbackMetadata.inputInfoBytes),@"input_writable":@(callbackMetadata.inputWritable),
         @"output_alias":@(callbackMetadata.outputAlias),@"accepted":@(callbackMetadata.accepted),@"coherent":@(callbackMetadata.coherent),
         @"route_queried":@(callbackMetadata.routeQueried),@"input_queried":@(callbackMetadata.inputQueried),@"sequence":@(callbackMetadata.sequence),@"dropped":@(callbackMetadata.dropped)};
+    presentation[@"apple_device_profile_admitted"]=@(audioTest.appleDeviceProfileAdmitted);
+    presentation[@"device_start_entries"]=@(audioTest.deviceStartEntries);presentation[@"device_start_at_time_entries"]=@(audioTest.deviceStartAtTimeEntries);
+    presentation[@"device_start_original_calls"]=@(audioTest.deviceStartOriginalCalls);presentation[@"device_start_original_failures"]=@(audioTest.deviceStartOriginalFailures);
+    presentation[@"device_start_refusals"]=@(audioTest.deviceStartRefusals);presentation[@"io_proc_create_entries"]=@(audioTest.ioProcCreateEntries);
+    presentation[@"io_proc_create_original_failures"]=@(audioTest.ioProcCreateOriginalFailures);presentation[@"io_proc_capture_suppressed"]=@(audioTest.ioProcCaptureSuppressed);
+    presentation[@"io_proc_destroy_entries"]=@(audioTest.ioProcDestroyEntries);presentation[@"io_proc_destroy_original_failures"]=@(audioTest.ioProcDestroyOriginalFailures);
+    presentation[@"lifecycle_refusals"]=@(audioTest.lifecycleRefusals);presentation[@"sink_lifecycle_refusals"]=@(audioTest.sinkLifecycleRefusals);
+    const auto& unitGate=audioTest.unitDeviceGate;
+    presentation[@"unit_device_gate"]=@{@"scopes_begun":@(unitGate.scopesBegun),@"scope_refusals":@(unitGate.scopeRefusals),@"creates_captured":@(unitGate.createsCaptured),
+        @"create_refusals":@(unitGate.createRefusals),@"starts_allowed":@(unitGate.startsAllowed),@"start_refusals":@(unitGate.startRefusals),@"revocations":@(unitGate.revocations),
+        @"last_reason":@(unitGate.lastReason),@"last_device":@(unitGate.lastDevice),@"last_stage":@(unitGate.lastStage),@"poisoned":@(unitGate.poisoned)};
+    const auto& deviceIO=audioTest.lastDeviceIO;
+    presentation[@"last_device_io"]=@{@"sequence":@(deviceIO.sequence),@"caller_offset":@(deviceIO.callerOffset),@"callback_offset":@(deviceIO.callbackOffset),
+        @"api":@(deviceIO.api),@"stage":@(deviceIO.stage),@"device_id":@(deviceIO.deviceID),@"pair":@(deviceIO.pair),@"caller_source":@(deviceIO.callerSource),@"callback_source":@(deviceIO.callbackSource),
+        @"original_status":@(deviceIO.originalStatus),@"original_invoked":@(deviceIO.originalInvoked),@"captured":@(deviceIO.captured),@"suppressed":@(deviceIO.suppressed)};
     data[@"native_audio_test_presentation"]=presentation;
     data[@"admitted_source_profile"]=@{@"sample_rate":@48000,@"channels":@[@1,@2],@"maximum_source_seconds":@300,
         @"maximum_pcm_bytes_per_source":@(64u*1024u*1024u),@"maximum_pcm_bytes_total":@(128u*1024u*1024u),
@@ -957,9 +974,10 @@ void status(){
     data[@"window_metadata_is_native_graph_proof"]=@NO;
     data[@"runtime_qualified"]=@NO;data[@"run_id"]=@(app.runID.c_str());data[@"pid"]=@(getpid());
     NSData* json=[NSJSONSerialization dataWithJSONObject:data options:NSJSONWritingPrettyPrinted error:nil];
-    if(json)[json writeToFile:@((app.runDirectory+"/fl-ara-status.json").c_str()) atomically:YES];
+    return json&&[json writeToFile:@((app.runDirectory+"/fl-ara-status.json").c_str()) atomically:YES];
 }
 void tick(const NativeApplication& app,void*)noexcept{
+    if(!pthread_main_np()||!nativeApplicationAdmitted())return;
     pollNativeSaveGuardTransactions();
     // A vendor may pump a nested run loop while its native Save frame owns a
     // foreign lock. Never enter any model/cache/ARA SDK operation there.
@@ -967,17 +985,20 @@ void tick(const NativeApplication& app,void*)noexcept{
     auto& rt=runtime();if(rt.inTick)return;rt.inTick=true;
     struct Reset{bool& flag;~Reset(){flag=false;}} reset{rt.inTick};
     try{
+        // Publish actual engine readiness before a source refresh or modal can
+        // occupy the model thread. No graph/ARA qualification is inferred.
+        if(!rt.nativeReadyStatusPublished&&app.admitted&&app.engineReady)rt.nativeReadyStatusPublished=status();
         if(rt.unboundArchiveRefusals.exchange(0)){
             rt.error="This native component is not ARA-bound. Its ARA archive was refused unchanged; component saving is blocked to preserve it";
             writeNativeApplicationEvent("unbound_native_ara_archive_refused",rt.error);
             NSAlert* alert=[NSAlert new];alert.messageText=@"ARA project state could not be restored";alert.informativeText=@(rt.error.c_str());
-            [alert addButtonWithTitle:@"Keep session open"];if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];
+            [alert addButtonWithTitle:@"Keep session open"];status();if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];
         }
         if(rt.unsupportedOffMainARAInitializations.exchange(0)){
             rt.error="An actual native ARA component initialized off the main thread; ARA binding is unsupported for that component in this run";
             writeNativeApplicationEvent("actual_native_ara_offmain_initialize_refused",rt.error);
             NSAlert* alert=[NSAlert new];alert.messageText=@"ARA unavailable for this native component";alert.informativeText=@(rt.error.c_str());
-            [alert addButtonWithTitle:@"Keep session open"];if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];
+            [alert addButtonWithTitle:@"Keep session open"];status();if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];
         }
         if(!rt.overlay&&app.engineReady){lab::FLStandaloneOverlayConfig config;config.actualEngineImageBase=app.engine.imageBase;
             config.exactLoadedEnginePath=app.enginePath;config.exactEngineArm64SliceSHA256=app.engine.verifiedArm64SliceSHA256;
@@ -1019,7 +1040,7 @@ void tick(const NativeApplication& app,void*)noexcept{
         for(auto& owned:rt.records){auto& r=*owned;if(!r.alive)continue;
             if(r.fault.exchange(false)){if(!r.disabled)fail(r,"ARA/native contract fault; this insert is unavailable");
                 NSAlert* alert=[NSAlert new];alert.messageText=@"ARA unavailable for this FL insert";alert.informativeText=@(r.error.c_str());
-                [alert addButtonWithTitle:@"Keep session open"];if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];r.fault=false;}
+                [alert addButtonWithTitle:@"Keep session open"];status();if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];r.fault=false;}
             if(r.disabled||!r.setupQualified||!stopped())continue;
             try{Boundary boundary(r);ensureOverlayAtModelBoundary();
                 refreshAtBoundary(r,true);rt.overlay->collectRetiredOnModelThread();}
@@ -1059,17 +1080,17 @@ void tick(const NativeApplication& app,void*)noexcept{
         if(!initialWaitReason.empty()){
             NSAlert* alert=[NSAlert new];alert.messageText=@"ARA is still preparing an insert";
             alert.informativeText=@((std::string("Playback for this insert is held until its source audio is ready. Stop playback to let preparation finish. ")+initialWaitReason).c_str());
-            [alert addButtonWithTitle:@"Keep session open"];if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];
+            [alert addButtonWithTitle:@"Keep session open"];status();if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];
         }
         if(rt.nativeStopNoticeQueued){rt.nativeStopNoticeQueued=false;
             NSAlert* alert=[NSAlert new];alert.messageText=@"Playback stopped for an ARA edit";
             alert.informativeText=@"Native FL playback was stopped while changed ARA source caches rebuild. Playback remains stopped; press Play when the insert is ready.";
-            [alert addButtonWithTitle:@"Keep stopped"];if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];
+            [alert addButtonWithTitle:@"Keep stopped"];status();if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];
         }
         if(rt.nativeSaveAlertQueued){rt.nativeSaveAlertQueued=false;
             NSAlert* alert=[NSAlert new];alert.messageText=@"FL project save was refused to preserve ARA state";
             alert.informativeText=@(rt.nativeSaveError.c_str());[alert addButtonWithTitle:@"Keep session open"];
-            if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];}
+            status();if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];}
         if(++rt.ticks%10==0)status();
     }catch(const std::exception& e){rt.error=e.what();writeNativeApplicationEvent("ara_app_bridge_tick_refused",e.what());status();}
     catch(...){rt.error="Unknown native SDK exception in app bridge";writeNativeApplicationEvent("ara_app_bridge_tick_refused",rt.error);}

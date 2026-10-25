@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Build native Swift launcher; no vendor binaries or third-party licenses bundled."""
-import argparse, hashlib, json, os, plistlib, shutil, subprocess
+import argparse, hashlib, json, os, plistlib, re, shutil, subprocess
 from pathlib import Path
 from bundle_manifest import sanitized_manifest
 root = Path(__file__).resolve().parents[1]
+version = re.search(r'^let launcherVersion = "([0-9]+\.[0-9]+\.[0-9]+)-candidate\.([1-9][0-9]*)"$', (root/'native/Launcher.swift').read_text(), re.MULTILINE)
+if not version:raise ValueError('Native candidate version must specify its build number')
 p = argparse.ArgumentParser(description=__doc__)
 p.add_argument('--output', type=Path, default=root / 'dist')
 p.add_argument('--helper', type=Path, help='Root-qualified native FLAppBridge.dylib')
@@ -34,7 +36,7 @@ public_manifest=sanitized_manifest(manifest,native/'FLAppBridge.dylib',root)
 entry=macos/'FL ARA Launcher'
 subprocess.run(['xcrun','swiftc','-target','arm64-apple-macos15.4','-O','-module-cache-path',str(out/'.swift-module-cache'),str(root/'native/Launcher.swift'),'-o',str(entry)],check=True,env=build_env)
 with (app/'Contents/Info.plist').open('wb') as stream:
-    plistlib.dump({'CFBundleIdentifier':'com.rysupaudio.fl-ara-launcher','CFBundleName':'FL ARA Launcher','CFBundleExecutable':entry.name,'CFBundlePackageType':'APPL','CFBundleShortVersionString':'0.1.0','CFBundleVersion':'1','LSMinimumSystemVersion':'15.4','LSArchitecturePriority':['arm64'],'NSHighResolutionCapable':True,'NSHumanReadableCopyright':'Copyright 2026 Rys Up Audio LLC. MIT License. Independent of Image-Line.'},stream)
+    plistlib.dump({'CFBundleIdentifier':'com.rysupaudio.fl-ara-launcher','CFBundleName':'FL ARA Launcher','CFBundleExecutable':entry.name,'CFBundlePackageType':'APPL','CFBundleShortVersionString':version.group(1),'CFBundleVersion':version.group(2),'LSMinimumSystemVersion':'15.4','LSArchitecturePriority':['arm64'],'NSHighResolutionCapable':True,'NSHumanReadableCopyright':'Copyright 2026 Rys Up Audio LLC. MIT License. Independent of Image-Line.'},stream)
 for name in ['LICENSE','README.md','THIRD_PARTY_NOTICES.md']: shutil.copy2(root/name, resources/name)
 shutil.copytree(root/'third_party_licenses', resources/'ThirdPartyLicenses')
 print(app)

@@ -15,6 +15,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -23,6 +24,11 @@ namespace rysup::ara_lab {
 namespace {
 constexpr std::uintptr_t voiceVMTOffset=0x1554a58,sourceReadOffset=0x7da970;
 constexpr std::uintptr_t sourceReadSlot=0x130,channelVMTOffset=0x1508640;
+// Same exact ARM64 engine: passive retained/current R6 proof found this class
+// (2288/-2288 bytes) deriving directly from 0x1508640 (2016/-2016 bytes).
+// FLNativeModel validates the bounded FPC parent chain and retains ACTUAL vptr.
+// This is one observed derived class, not admission of arbitrary subclasses.
+constexpr std::uintptr_t observedAudioChannelVMTOffset=0x150c000;
 constexpr std::uintptr_t sampleVMTOffset=0x146bb98,baseSampleVMTOffset=0x144f960;
 constexpr std::uintptr_t readerVMTOffset=0x1487358,blockFramesOffset=0x21a23b4;
 constexpr std::size_t maximumInstances=64,maximumRegions=100000,maximumChannels=4096;
@@ -49,6 +55,37 @@ Digest parseDigest(const std::string& text){
     auto digit=[](char c){return c<='9'?c-'0':c-'a'+10;};
     for(std::size_t i=0;i<digest.size();++i)digest[i]=std::uint8_t(digit(text[i*2])*16+digit(text[i*2+1]));return digest;
 }
+bool capturedChannelClassQualified(const FLNativeModelSnapshot& model,const FLNativeChannelSnapshot& channel,std::uintptr_t base){
+    if(base>std::numeric_limits<std::uintptr_t>::max()-observedAudioChannelVMTOffset)return false;
+    if(channel.actualChannelVMT==base+channelVMTOffset)return true; // Existing exact base admission.
+    if(channel.actualChannelVMT!=base+observedAudioChannelVMTOffset)return false;
+    // The observed derived class additionally requires the complete actual
+    // reader inventory, whose class was already proven by validateObject's
+    // sealed-image FPC ancestry walk. Never substitute/normalize its vptr.
+    if(!model.repeatedReadsMatched||model.verifiedArm64SliceSHA256!=kFLStandaloneOverlayEngineArm64SHA256||model.engineImageBase!=base
+        ||!model.allNativeManagerChannelsInspected||model.nativeChannelCount<0||model.nativeManagerMembers.size()!=std::size_t(model.nativeChannelCount)
+        ||channel.managerIndex>=model.nativeManagerMembers.size())return false;
+    const auto& member=model.nativeManagerMembers[channel.managerIndex];
+    return member.managerIndex==channel.managerIndex&&member.actualChannelObject==channel.channelObject
+        &&member.actualChannelVMT==channel.actualChannelVMT&&member.nativeChannelType150==4&&channel.nativeChannelType150==4;
+}
+std::string physicalChannelRefusal(const FLNativeModelSnapshot& model,const FLStandaloneSourceEvidence& source,
+    const FLNativeChannelSnapshot* channel,std::uintptr_t base,std::int32_t mixer){
+    // Model-thread diagnostic only. RT checks below retain fixed enum/atomic
+    // reporting and perform no allocation, ancestry walk or native call.
+    std::ostringstream text;text<<"standalone source actual physical native channel differs: evidence_channel="<<source.nativeChannelIndex
+        <<" channel_found="<<(channel?1:0)<<" model_sources="<<model.sources.size()<<" expected_mixer="<<mixer
+        <<" engine_base=0x"<<std::hex<<base<<" expected_base_vmt=0x"<<(base+channelVMTOffset)
+        <<" expected_observed_derived_vmt=0x"<<(base+observedAudioChannelVMTOffset)<<std::dec;
+    if(channel){text<<" manager_index="<<channel->managerIndex<<" source_index="<<channel->sourceSnapshotIndex<<" type150="<<channel->nativeChannelType150
+        <<" mixer_supported="<<channel->nativeMixerInsertSupported<<" actual_mixer="<<channel->nativeMixerInsert248
+        <<" channel_object=0x"<<std::hex<<channel->channelObject<<" actual_vmt=0x"<<channel->actualChannelVMT;
+        if(channel->actualChannelVMT>=base)text<<" actual_vmt_offset=0x"<<(channel->actualChannelVMT-base);
+        text<<std::dec<<" complete_reader_inventory="<<model.allNativeManagerChannelsInspected
+            <<" captured_class_qualified="<<capturedChannelClassQualified(model,*channel,base);}
+    return text.str();
+}
+
 template<class T>T fromBytes(const void* bytes,std::size_t offset)noexcept{T value{};std::memcpy(&value,static_cast<const std::uint8_t*>(bytes)+offset,sizeof(value));return value;}
 bool boundedRead(std::uintptr_t source,void* destination,std::size_t bytes)noexcept{
     if(!source||!destination||!bytes||source>std::numeric_limits<std::uintptr_t>::max()-bytes)return false;
@@ -227,9 +264,11 @@ struct FLStandaloneSourceOverlay::Impl{
         next->sources.reserve(decoded.sources.size());
         for(const auto& evidence:decoded.sources){
             const auto channel=std::find_if(next->model->channels.begin(),next->model->channels.end(),[&](const auto& c){return c.managerIndex==evidence.nativeChannelIndex;});
-            demand(channel!=next->model->channels.end()&&channel->sourceSnapshotIndex<next->model->sources.size()&&
+            const bool physicalChannelMatches=channel!=next->model->channels.end()&&channel->sourceSnapshotIndex<next->model->sources.size()&&
                 channel->nativeChannelType150==4&&channel->nativeMixerInsertSupported&&channel->nativeMixerInsert248==next->mixer&&
-                channel->channelObject&&channel->actualChannelVMT==config.actualEngineImageBase+channelVMTOffset,"standalone source actual physical native channel differs");
+                channel->channelObject&&capturedChannelClassQualified(*next->model,*channel,config.actualEngineImageBase);
+            if(!physicalChannelMatches)throw std::runtime_error(physicalChannelRefusal(*next->model,evidence,
+                channel==next->model->channels.end()?nullptr:&*channel,config.actualEngineImageBase,next->mixer));
             const auto& sample=next->model->sources[channel->sourceSnapshotIndex];
             demand(sample.waveSampleObject&&sample.nativePCMAddress90&&channel->nativeWaveSampleObject328==sample.waveSampleObject&&
                 channel->actualNativeWaveSampleVMT==sample.actualWaveSampleVMT&&
@@ -626,6 +665,11 @@ std::shared_ptr<FLNativeModelSnapshot> syntheticModel(){
             clip.channelSnapshotIndex=c;clip.channelIndex06=channel.managerIndex;clip.packedTypeAndChannel04=0x5000|(std::uint32_t(channel.managerIndex)<<16);
             clip.kind=FLNativeRecordKind::AudioChannel;clip.nativeTrack0C=c;clip.timelineStartTicks00=r?5760:0;clip.timelineLengthTicks08=r?1920:3840;
             clip.nativeSourceStart18=r?250.0f:0.0f;clip.nativeSourceEnd1C=r?1250.0f:2000.0f;updateSynthetic(clip);model->clips.push_back(clip);}}
+    model->allNativeManagerChannelsInspected=true;
+    for(int i=0;i<model->nativeChannelCount;++i){FLNativeManagerMemberSnapshot member;
+        member.managerIndex=i;member.actualChannelObject=0xb00000+i*0x1000;member.actualChannelVMT=syntheticBase+channelVMTOffset;member.nativeChannelType150=0;
+        for(const auto& channel:model->channels)if(channel.managerIndex==i)member={channel.managerIndex,channel.channelObject,channel.actualChannelVMT,channel.nativeChannelType150};
+        model->nativeManagerMembers.push_back(member);}
     model->nativeRecordCount=int(model->clips.size());return model;
 }
 FLStandaloneDecodedGraph syntheticDecoded(const FLNativeModelSnapshot& model,int mixer){
@@ -864,6 +908,56 @@ void publicationControls(){
     f.owner.held=false;bool refused=false;try{f.router.removeInstanceAtNativeBoundary("mono");}catch(const std::exception&){refused=true;}f.owner.held=true;
     demand(refused,"native owner hold was optional");pass("publication/removal/retirement require actual held native owner and owning model thread");
 }
+void setSyntheticCapturedChannelClass(FLNativeModelSnapshot& model,std::uintptr_t offset){
+    auto& channel=model.channels[0];channel.actualChannelVMT=syntheticBase+offset;
+    model.nativeManagerMembers[channel.managerIndex].actualChannelVMT=channel.actualChannelVMT;
+}
+void observedChannelClassControls(){
+    for(const auto offset:{channelVMTOffset,observedAudioChannelVMTOffset}){
+        SyntheticOwner owner;FLStandaloneSourceOverlay router(syntheticConfig(owner));auto model=syntheticModel();setSyntheticCapturedChannelClass(*model,offset);
+        const auto decoded=syntheticDecoded(*model,1);auto gate=std::make_shared<StandaloneCacheGate>();router.publish("class",decoded,model,syntheticBatch("class",decoded,gate));
+        std::array<float,14> output;output.fill(marker);auto read=syntheticRead(*model,1,output.data()+1);
+        demand(rtRead(router,read)==FLStandaloneOverlayOutcome::Applied&&output[1]==3.0f/1024.0f&&output[0]==marker&&output[13]==marker,
+            "sealed base/observed-derived channel did not publish and render with exact captured VMT");
+        pass(offset==channelVMTOffset?"exact sealed base channel VMT publishes and renders against its captured identity":"observed exact derived channel VMT plus complete reader inventory publishes and renders against its captured identity");
+        output.fill(marker);read=syntheticRead(*model,1,output.data()+1);
+        read.channelVMT=syntheticBase+(offset==channelVMTOffset?observedAudioChannelVMTOffset:channelVMTOffset);const auto before=output;
+        demand(rtRead(router,read)==FLStandaloneOverlayOutcome::Rejected&&output==before&&!gate->authorizes(gate->currentTicket()),
+            "accepting a known publication class weakened exact captured live VMT equality");
+        const auto faults=router.takeFaultsOnModelThread();demand(faults.size()==1&&faults[0].firstFault==FLStandaloneOverlayFault::ClassSeal,
+            "changed live VMT did not retain class-seal refusal");router.shutdownAtNativeBoundary();
+        pass(offset==channelVMTOffset?"base publication refuses a live observed-derived VMT swap and leaves output untouched":"derived publication refuses a live base VMT swap and leaves output untouched");
+    }
+    {
+        SyntheticOwner owner;FLStandaloneSourceOverlay router(syntheticConfig(owner));auto model=syntheticModel();setSyntheticCapturedChannelClass(*model,observedAudioChannelVMTOffset);
+        const auto decoded=syntheticDecoded(*model,1);auto gate=std::make_shared<StandaloneCacheGate>();router.publish("class",decoded,model,syntheticBatch("class",decoded,gate));
+        std::array<float,14> output;output.fill(marker);auto read=syntheticRead(*model,1,output.data()+1);read.channelVMT+=8;const auto before=output;
+        demand(rtRead(router,read)==FLStandaloneOverlayOutcome::Rejected&&output==before&&owner.fault,"unknown live VMT was accepted after observed-derived publication");
+        const auto faults=router.takeFaultsOnModelThread();demand(faults.size()==1&&faults[0].firstFault==FLStandaloneOverlayFault::ClassSeal,"unknown live class lost exact class-seal refusal");
+        router.shutdownAtNativeBoundary();pass("observed-derived publication rejects unknown live VMT without allocation or output mutation");
+    }
+    const auto rejectClass=[](const char* name,auto change,bool numeric){
+        // Fresh EMPTY router: rejection cannot be a false positive caused by
+        // duplicate mixer ownership in an already published fixture.
+        SyntheticOwner owner;FLStandaloneSourceOverlay router(syntheticConfig(owner));auto model=syntheticModel();setSyntheticCapturedChannelClass(*model,observedAudioChannelVMTOffset);change(*model);
+        auto decoded=syntheticDecoded(*model,1);auto gate=std::make_shared<StandaloneCacheGate>();std::string refusal;
+        try{router.publish("class",decoded,model,syntheticBatch("class",decoded,gate));}catch(const std::exception& error){refusal=error.what();}
+        demand(refusal.find("standalone source actual physical native channel differs:")!=std::string::npos&&router.instanceStatsOnModelThread().empty(),
+            "bad captured class/inventory did not fail its own physical class guard");
+        if(numeric)demand(refusal.find("actual_vmt_offset=0x150c008")!=std::string::npos&&refusal.find("evidence_channel=3")!=std::string::npos
+            &&refusal.find("manager_index=3")!=std::string::npos&&refusal.find("source_index=0")!=std::string::npos&&refusal.find("actual_mixer=1")!=std::string::npos
+            &&refusal.find("captured_class_qualified=0")!=std::string::npos,"physical class refusal omitted actual numeric provenance");
+        router.shutdownAtNativeBoundary();pass(name);
+    };
+    rejectClass("unknown captured channel class is refused even with matching inventory; refusal reports numeric VMT/index/mixer provenance",
+        [](auto& model){setSyntheticCapturedChannelClass(model,observedAudioChannelVMTOffset+8);},true);
+    rejectClass("observed-derived channel requires complete actual reader inventory",
+        [](auto& model){model.allNativeManagerChannelsInspected=false;},false);
+    rejectClass("observed-derived channel refuses mismatched reader member VMT",
+        [](auto& model){model.nativeManagerMembers[model.channels[0].managerIndex].actualChannelVMT=syntheticBase+channelVMTOffset;},false);
+    rejectClass("observed-derived channel refuses mismatched reader member object",
+        [](auto& model){++model.nativeManagerMembers[model.channels[0].managerIndex].actualChannelObject;},false);
+}
 void forwardingControl(){
     struct NativeCall{unsigned calls=0;std::uintptr_t enabled=0;void* context=nullptr;double readerPosition=17,voiceSnapshot=-1;std::array<float,8> values{};}native;
     auto original=+[](void* self,std::uintptr_t enabled,void* context,float** output,std::int32_t* count,std::uint8_t* ended,std::uint8_t* changed){
@@ -931,7 +1025,7 @@ void disabledTeardownControls(){
     }
 }
 int sourceOverlayOfflineMain(){
-    positiveControls();zeroControls();staleHoldControls();negativeControls();publicationControls();forwardingControl();concurrentLifecycleControl();disabledTeardownControls();
+    positiveControls();zeroControls();staleHoldControls();negativeControls();publicationControls();observedChannelClassControls();forwardingControl();concurrentLifecycleControl();disabledTeardownControls();
     std::cout<<"{\"schema\":\"rysup.standalone-fl.source-overlay-offline/1\",\"pass\":true,\"checks\":"<<passed.size()
         <<",\"synthetic_inputs\":true,\"native_engine_loaded\":false,\"native_hook_installed\":false,\"third_party_runtime_qualified\":false,\"rt_allocations\":"<<overlayOfflineRTAllocations.load()<<",\"controls\":[";
     for(std::size_t i=0;i<passed.size();++i){if(i)std::cout<<',';std::cout<<'"'<<passed[i]<<'"';}std::cout<<"]}\n";return 0;

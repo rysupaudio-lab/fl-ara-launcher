@@ -1,5 +1,6 @@
 #pragma once
 #include "FLNativeModel.h"
+#include "FLUnitDeviceGate.h"
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -51,6 +52,18 @@ struct NativeAudioTestStats {
     NativeOutputStartDiagnostic lastOutputStart;
     NativeOutputRegistrationDiagnostic lastRegistration;
     NativeOutputCallbackMetadataDiagnostic callbackMetadata;
+    bool appleDeviceProfileAdmitted=false;
+    std::uint64_t deviceStartEntries=0,deviceStartAtTimeEntries=0,deviceStartOriginalCalls=0,deviceStartOriginalFailures=0;
+    std::uint64_t ioProcCreateEntries=0,ioProcCreateOriginalFailures=0,ioProcDestroyEntries=0,lifecycleRefusals=0;
+    std::uint64_t deviceStartRefusals=0,ioProcCaptureSuppressed=0,ioProcDestroyOriginalFailures=0;
+    std::uint64_t sinkLifecycleRefusals=0;
+    test_output::FLUnitDeviceGate::Stats unitDeviceGate;
+    struct DeviceIODiagnostic {
+        std::uint64_t sequence=0,callerOffset=0,callbackOffset=0;
+        std::uint32_t api=0,stage=0,deviceID=0,pair=0,callerSource=0,callbackSource=0;
+        std::int32_t originalStatus=0;
+        bool originalInvoked=false,captured=false,suppressed=false;
+    } lastDeviceIO;
 };
 struct NativeApplicationCallbacks {
     void (*admitted)(const NativeApplication&,void*) noexcept=nullptr;

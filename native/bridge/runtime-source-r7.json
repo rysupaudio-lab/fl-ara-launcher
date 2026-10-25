@@ -1,0 +1,93 @@
+{
+  "schema": "rysup.fl-ara-runtime-source-delta/1",
+  "candidate": "r7-device-gate",
+  "prior_runtime_source_manifest": "runtime-source-r6.json",
+  "upstream_source_freeze_sha256": "2810f529f5ecfc21940e349ef1ea4857725bbe1589fb2a1cd189d6ada2f4c529",
+  "runtime_allowlist_sha256": "cc24969b75f9debbb62efc54d9283b6a8e58ea806e1c088a77e6673b230df3d2",
+  "compile_manifest_sha256": "4c5b17468d44b4e287cd3f29e3e7ab2909b3aed3d6691f823ad35eba0a1a6369",
+  "compiled_artifact_verification_sha256": "b7d32449f3045b8e28d34df7fe33c6bd9b1983733727c84767c63337b9425dcd",
+  "compiled_helper_original_sha256": "5e3d6385a6474b172c5b9cb38bf3ff6034c2d0000fcbe6e0ea51a40df5f8a4e0",
+  "candidate_kind": "full-compiled-device-gate-unqualified",
+  "device_start_admission_compiled": true,
+  "actual_audio_io_qualified": false,
+  "runtime_qualified": false,
+  "sdk_source_imported": false,
+  "vendor_binary_or_audio_imported": false,
+  "private_qa_static_review_imported": false,
+  "files": [
+    {
+      "path": "native/bridge/native/FLAppBridge.mm",
+      "previous_sha256": "86be58850a10a4429432bbb7f39ba6c0ee30054c03da76b6086ca33d9c8de539",
+      "sha256": "d2d097f7dab977baa08887e9cf4992508301f3a0f98876275e61b45531f589b3",
+      "bytes": 101998
+    },
+    {
+      "path": "native/bridge/native/FLNativeApplication.mm",
+      "previous_sha256": "6baf5d8c27416f1ee33d02577fad9b6270fb5e837fdd635853b9407083ae19cc",
+      "sha256": "5e18ce85124bb2651ba4932ec9e2188160831b5a2665e4529187c11d675257cc",
+      "bytes": 48451
+    },
+    {
+      "path": "native/bridge/native/FLStandaloneSourceOverlay.cpp",
+      "previous_sha256": "9886e1e30610e6fd894fe01caf0d11b28603ea42b0eacf3b556d4f02908e15f9",
+      "sha256": "f329af6373142c6860fa8ae85053f5c6f37f1680317fdccb9816d8d3ce1477ea",
+      "bytes": 103295
+    },
+    {
+      "path": "native/bridge/native/FLTestOutputSink.cpp",
+      "previous_sha256": "9d2405bb3876de440bfcb258a4ac9dff8059ea1dcaa560325f3d65594b9e1daa",
+      "sha256": "fb394805fa40ea0d1282d57c691d5a4b38ada8376059dad226ba95a36144525b",
+      "bytes": 33154
+    },
+    {
+      "path": "native/bridge/native/FLUnitDeviceGate.cpp",
+      "previous_sha256": null,
+      "sha256": "f6e6f981bd510baff69b637131e6033a8980fd491a15457725c06a42e654bb37",
+      "bytes": 16922
+    },
+    {
+      "path": "native/bridge/native/FLNativeApplication.h",
+      "previous_sha256": "b1ddaabb2034acd29817451e4ed16e7aad184e45813f6801c015212a1431b35a",
+      "sha256": "277b164aa0df97c3531e9293482e0c90860c65e3c9be0a21429294557dedadcd",
+      "bytes": 6194
+    },
+    {
+      "path": "native/bridge/native/FLPointerProvenance.h",
+      "previous_sha256": null,
+      "sha256": "d28b677c12fb098abf7bb3eee925b77717d733bc436bf724ae1167ff984e7965",
+      "bytes": 571
+    },
+    {
+      "path": "native/bridge/native/FLTestOutputSink.h",
+      "previous_sha256": "f068426da870b2e4a49c7a9e146b6b1124b8d518ac56a6c5dd5f0c9082c2fc87",
+      "sha256": "6f7cb2c76b497286afedaf9075d186afa63e754d90402a1428fb55ee7229b605",
+      "bytes": 10628
+    },
+    {
+      "path": "native/bridge/native/FLUnitDeviceGate.h",
+      "previous_sha256": null,
+      "sha256": "2f09dad55029507c35e7f3113bc1f3291dcdacd91e0630ae77bffc348034173f",
+      "bytes": 7890
+    },
+    {
+      "path": "native/bridge/native/build_helper.py",
+      "previous_sha256": "962edc79024cfe272212c54c6c6afe6d4c97ce8a48d8357a5985aecee8d23e45",
+      "sha256": "254be7da59646c4014b90f3638fc35393f3dced93594f828b03c8c522d026548",
+      "bytes": 7671
+    },
+    {
+      "path": "native/bridge/native/FL_UNIT_DEVICE_GATE.md",
+      "sha256": "0a1dc3c6d7f3d7a7c78c7f0959014da76052c776635ef785b5fa3ab4fa1cc070",
+      "frozen_sha256": "5b92cbf557b0c3910fd695cd74eec756dcf9b3f3cc40eb7e14c3d9e6c7eea24d",
+      "public_doc_transform": "replace_session_coordination_with_native_owner_contract",
+      "bytes": 6623
+    },
+    {
+      "path": "native/bridge/native/FL_NATIVE_DEVICE_START_ADMISSION.md",
+      "sha256": "97e1a350c8a88e94a2b48e3918617c1f8cae0d1df35d695aa2bd36e52b2f112d",
+      "frozen_sha256": "166aaa8fa87ca6ab2d3ac43983ae0c56d866bab8c6e73a13f010f29d15307fa3",
+      "public_doc_transform": "replace_session_coordination_with_native_owner_contract",
+      "bytes": 5307
+    }
+  ]
+}

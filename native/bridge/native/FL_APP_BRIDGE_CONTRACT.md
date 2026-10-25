@@ -235,6 +235,16 @@ positive genuine-ARA/native-FLP save and cold reopen are separate required tests
 
 ## Build
 
+The compiled device-gate candidate publishes actual admitted engine readiness
+before potentially blocking model refresh or modal UI. This early status does
+not infer a loaded graph, ARA binding, device-start success or audio capability.
+The source overlay accepts the observed sealed derived audio-channel class only
+with matching complete native manager inventory and captured object identity;
+runtime reads still require the exact captured VMT. Device policy and lifecycle
+contracts are in `FL_UNIT_DEVICE_GATE.md` and
+`FL_NATIVE_DEVICE_START_ADMISSION.md`. Compilation leaves all actual runtime
+qualification flags false.
+
 ```
 python3 build_helper.py --ara-sdk /explicit/ARA_SDK --vst3-sdk /explicit/VST3_SDK \
   --legacy-host /explicit/FLNativeModel/source --output /explicit/build

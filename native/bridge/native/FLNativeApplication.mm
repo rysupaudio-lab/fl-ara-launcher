@@ -3,6 +3,8 @@
 #include "FLNativeApplication.h"
 #include "RegistrationReadThrough.h"
 #include "FLTestOutputSink.h"
+#include "FLUnitDeviceGate.h"
+#include "FLPointerProvenance.h"
 #include <CoreAudio/CoreAudio.h>
 #include <AudioToolbox/AudioToolbox.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -27,15 +29,22 @@
 namespace rysup::fl_ara { namespace {
 constexpr const char* exeSHA="5be78aa9f9f066f3b28747b48357769b70979e859b42661f2af7163f08e57aab";
 constexpr const char* engineSHA="8d23eebf0fc63fdd1957ba2c8d0f1f1d4e053a9f43173d3c22606c47ace7b76d";
+constexpr const char* appleAudioComponent="/System/Library/Components/CoreAudio.component/Contents/MacOS/CoreAudio";
+constexpr const char* appleAudioComponentSHA="64635af4212b6c5f257182cdbcbcdf553081a9e23f971fc4b9e0f4b1fb901f87";
+using UnitGate=test_output::FLUnitDeviceGate;
 constexpr const char* wrapperSHA="445dd1766e95013acc5046d7f08346fa04ef451a5d16e035a800518199c4d456";
 struct State {
     NativeApplication app;NativeApplicationCallbacks callbacks;
+    const bool testModeRequested=getenv("RYSUP_FLARA_TEST_AUDIO_DEVICE_UID")!=nullptr;
     CFRunLoopTimerRef timer=nullptr;int log=-1;void** actualOutArgument=nullptr;
     std::string testDeviceUID;std::atomic<bool> enabled{false};
     std::atomic<test_output::FLTestOutputSink*> testSink{nullptr};
     std::atomic<std::uint64_t> permittedDeviceStarts{0},refusedDeviceStarts{0};
     std::mutex outputStartDiagnosticMutex;
     NativeOutputStartDiagnostic outputStartDiagnostic;
+    UnitGate unitDeviceGate;std::string appleComponentPath;std::atomic<bool> appleProfileAdmitted{false};
+    std::array<std::atomic<std::uint64_t>,11> unitDeviceCounts{};
+    std::mutex deviceIODiagnosticMutex;NativeAudioTestStats::DeviceIODiagnostic deviceIODiagnostic;
 };
 State& state(){static State value;return value;}
 std::string canonical(const char* p){char value[PATH_MAX];return p&&realpath(p,value)?value:"";}
@@ -159,7 +168,7 @@ void* observedDlsym(void* handle,const char* name){void* result=dlsym(handle,nam
         && !imageAt((std::uintptr_t)result,s.app.enginePath,0x9ef0))return result;
     if(originalCreate&&originalCreate!=(Create)result)return result;originalCreate=(Create)result;return (void*)nativeCreate;
 }
-bool testAudioRequested()noexcept{return getenv("RYSUP_FLARA_TEST_AUDIO_DEVICE_UID")!=nullptr;}
+bool testAudioRequested()noexcept{return state().testModeRequested;}
 bool permittedDevice(AudioDeviceID device,NativeOutputStartDiagnostic* diagnostic=nullptr)noexcept{auto& s=state();if(!testAudioRequested())return true;
     if(!s.enabled.load()||s.testDeviceUID!="Pro Tools Audio Bridge 2-A_UID"){s.refusedDeviceStarts.fetch_add(1);return false;}
     AudioObjectPropertyAddress uidAddress{kAudioDevicePropertyDeviceUID,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};CFStringRef uid=nullptr;UInt32 size=sizeof(uid);
@@ -175,25 +184,209 @@ bool permittedDevice(AudioDeviceID device,NativeOutputStartDiagnostic* diagnosti
     const bool okay=validUID&&uidMatched&&virtualMatched;if(uid)CFRelease(uid);
     if(okay)s.permittedDeviceStarts.fetch_add(1);else s.refusedDeviceStarts.fetch_add(1);return okay;
 }
+// Restriction-only TLS: unrelated/rejected lifecycle calls cannot inherit an
+// outer start's capture/permission authority. This NEVER grants permission.
+thread_local std::uint32_t driverAuthoritySuppressed=0;
+struct SuppressDriverAuthority {
+    bool overflow=false;
+    SuppressDriverAuthority()noexcept{if(driverAuthoritySuppressed==UINT32_MAX)overflow=true;else ++driverAuthoritySuppressed;}
+    ~SuppressDriverAuthority(){if(!overflow)--driverAuthoritySuppressed;}
+};
+bool isActualAppleHAL(AudioUnit unit)noexcept{
+    if(!unit)return false;AudioComponentDescription description{};
+    const auto component=AudioComponentInstanceGetComponent(unit);
+    return component&&AudioComponentGetDescription(component,&description)==noErr&&
+        description.componentType==kAudioUnitType_Output&&description.componentSubType==kAudioUnitSubType_HALOutput&&
+        description.componentManufacturer==kAudioUnitManufacturer_Apple;
+}
+bool actualCaptureDevice(AudioUnit unit,AudioDeviceID& device)noexcept{
+    UInt32 bytes=sizeof(device);return isActualAppleHAL(unit)&&
+        AudioUnitGetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,0,&device,&bytes)==noErr&&
+        bytes==sizeof(device)&&permittedDevice(device);
+}
+void deviceIOCodeIdentity(std::uintptr_t code,std::uint32_t& source,std::uint64_t& offset)noexcept{
+    code=pointer_provenance::codeAddress(code);
+    Dl_info image{};if(!code||!dladdr(reinterpret_cast<void*>(code),&image)||!image.dli_fname){source=0;return;}
+    const auto base=reinterpret_cast<std::uintptr_t>(image.dli_fbase);if(code>=base)offset=code-base;
+    source=state().appleProfileAdmitted.load()&&canonical(image.dli_fname)==state().appleComponentPath?1:2;
+}
+void recordDeviceIO(NativeAudioTestStats::DeviceIODiagnostic diagnostic)noexcept{
+    try{auto& s=state();std::lock_guard<std::mutex> guard(s.deviceIODiagnosticMutex);
+        diagnostic.sequence=s.deviceIODiagnostic.sequence==UINT64_MAX?UINT64_MAX:s.deviceIODiagnostic.sequence+1;s.deviceIODiagnostic=diagnostic;}catch(...){}
+}
+UnitGate::Pair actualCreatePair(std::uintptr_t caller,AudioDeviceIOProc callback)noexcept{
+    const auto& s=state();if(!s.appleProfileAdmitted)return UnitGate::Pair::None;
+    caller=pointer_provenance::codeAddress(caller);
+    const auto code=pointer_provenance::codeAddress(reinterpret_cast<std::uintptr_t>(callback));
+    if(imageAt(caller,s.appleComponentPath,0x38bcc)&&imageAt(code,s.appleComponentPath,0xe5cb0))return UnitGate::Pair::AUHAL;
+    if(imageAt(caller,s.appleComponentPath,0x81b8)&&imageAt(code,s.appleComponentPath,0x9fd8))return UnitGate::Pair::Generic;
+    return UnitGate::Pair::None;
+}
+UnitGate::Pair actualStartPair(std::uintptr_t caller,bool atTime)noexcept{
+    const auto& s=state();if(!s.appleProfileAdmitted)return UnitGate::Pair::None;
+    caller=pointer_provenance::codeAddress(caller);
+    if(!atTime&&imageAt(caller,s.appleComponentPath,0x391c4))return UnitGate::Pair::AUHAL;
+    if(imageAt(caller,s.appleComponentPath,atTime?0x9bdc:0x9bec))return UnitGate::Pair::Generic;
+    return UnitGate::Pair::None;
+}
+OSStatus observedCreateIOProc(AudioDeviceID device,AudioDeviceIOProc callback,void* client,AudioDeviceIOProcID* out){
+    const auto caller=reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
+    if(!testAudioRequested())return AudioDeviceCreateIOProcID(device,callback,client,out);
+    auto& s=state();s.unitDeviceCounts[4].fetch_add(1,std::memory_order_relaxed);
+    NativeAudioTestStats::DeviceIODiagnostic diagnostic;diagnostic.api=3;diagnostic.stage=5;diagnostic.deviceID=device;
+    diagnostic.originalInvoked=true;diagnostic.suppressed=driverAuthoritySuppressed!=0;
+    deviceIOCodeIdentity(caller,diagnostic.callerSource,diagnostic.callerOffset);deviceIOCodeIdentity(reinterpret_cast<std::uintptr_t>(callback),diagnostic.callbackSource,diagnostic.callbackOffset);
+    const auto result=AudioDeviceCreateIOProcID(device,callback,client,out); // unchanged, ONCE
+    if(result)s.unitDeviceCounts[5].fetch_add(1,std::memory_order_relaxed);
+    if(nativeApplicationAdmitted()&&!driverAuthoritySuppressed&&s.appleProfileAdmitted){
+        const auto pair=actualCreatePair(caller,callback);
+        diagnostic.pair=static_cast<std::uint32_t>(pair);
+        diagnostic.captured=s.unitDeviceGate.recordCreate(device,reinterpret_cast<std::uintptr_t>(callback),
+            result==noErr&&out?reinterpret_cast<std::uintptr_t>(*out):0,result,pair);
+    }else s.unitDeviceCounts[9].fetch_add(1,std::memory_order_relaxed);
+    diagnostic.originalStatus=result;recordDeviceIO(diagnostic);return result;
+}
+OSStatus observedDestroyIOProc(AudioDeviceID device,AudioDeviceIOProcID callback){
+    const auto caller=reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
+    if(!testAudioRequested())return AudioDeviceDestroyIOProcID(device,callback);
+    auto& s=state();s.unitDeviceCounts[6].fetch_add(1,std::memory_order_relaxed);
+    NativeAudioTestStats::DeviceIODiagnostic diagnostic;diagnostic.api=4;diagnostic.deviceID=device;
+    deviceIOCodeIdentity(caller,diagnostic.callerSource,diagnostic.callerOffset);
+    auto destruction=s.unitDeviceGate.beginDestroy(device,reinterpret_cast<std::uintptr_t>(callback));
+    if(!destruction){diagnostic.stage=6;recordDeviceIO(diagnostic);s.unitDeviceCounts[7].fetch_add(1);return kAudioHardwareIllegalOperationError;}
+    auto* sink=s.testSink.load(std::memory_order_acquire);
+    test_output::FLTestOutputSink::LifecycleLease mutation;
+    if(destruction.known()){
+        const auto unit=reinterpret_cast<AudioUnit>(destruction.unit());
+        if(!sink){diagnostic.stage=7;recordDeviceIO(diagnostic);s.unitDeviceCounts[7].fetch_add(1);return kAudioHardwareIllegalOperationError;}
+        // Nested same-unit teardown already owns the exact per-unit mutation
+        // reservation. This is cleanup-only and never permits any device start.
+        if(!sink->unitMutationHeldByCurrentThread(unit)){
+            mutation=sink->tryAcquireLifecycleMutation(unit);
+            if(!mutation){diagnostic.stage=7;recordDeviceIO(diagnostic);s.unitDeviceCounts[7].fetch_add(1);return kAudioHardwareIllegalOperationError;}
+        }
+    }
+    if(!destruction.commitRevoke()){diagnostic.stage=8;recordDeviceIO(diagnostic);s.unitDeviceCounts[7].fetch_add(1);return kAudioHardwareIllegalOperationError;}
+    SuppressDriverAuthority suppressed;
+    const auto result=AudioDeviceDestroyIOProcID(device,callback); // ONCE, under exact ID reservation and unit mutation lease
+    if(result)s.unitDeviceCounts[10].fetch_add(1,std::memory_order_relaxed);
+    diagnostic.stage=5;diagnostic.originalInvoked=true;diagnostic.originalStatus=result;recordDeviceIO(diagnostic);
+    destruction.close();return result; // failed destroys remain revoked
+}
+bool approveNestedDeviceStart(AudioDeviceID device,AudioDeviceIOProcID callback,UnitGate::Pair pair,bool atTime,
+    NativeAudioTestStats::DeviceIODiagnostic& diagnostic)noexcept{
+    auto& s=state();diagnostic.stage=1;
+    if(!nativeApplicationAdmitted()||!s.appleProfileAdmitted.load())return false;
+    diagnostic.stage=2;if(driverAuthoritySuppressed)return false;
+    diagnostic.stage=3;if(!permittedDevice(device))return false;
+    diagnostic.stage=4;
+    return s.unitDeviceGate.approveDeviceStart(device,reinterpret_cast<std::uintptr_t>(callback),pair,atTime);
+}
 OSStatus observedDeviceStart(AudioDeviceID device,AudioDeviceIOProcID callback){
-    if(testAudioRequested()){state().refusedDeviceStarts.fetch_add(1);return kAudioHardwareIllegalOperationError;}
-    return AudioDeviceStart(device,callback);
+    const auto caller=reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
+    if(!testAudioRequested())return AudioDeviceStart(device,callback);
+    auto& s=state();s.unitDeviceCounts[0].fetch_add(1,std::memory_order_relaxed);
+    NativeAudioTestStats::DeviceIODiagnostic diagnostic;diagnostic.api=1;diagnostic.deviceID=device;diagnostic.suppressed=driverAuthoritySuppressed!=0;
+    const auto pair=actualStartPair(caller,false);diagnostic.pair=static_cast<std::uint32_t>(pair);deviceIOCodeIdentity(caller,diagnostic.callerSource,diagnostic.callerOffset);
+    if(!approveNestedDeviceStart(device,callback,pair,false,diagnostic)){
+        s.refusedDeviceStarts.fetch_add(1);s.unitDeviceCounts[8].fetch_add(1);recordDeviceIO(diagnostic);return kAudioHardwareIllegalOperationError;
+    }
+    s.unitDeviceCounts[2].fetch_add(1,std::memory_order_relaxed);
+    const auto result=AudioDeviceStart(device,callback); // unchanged, ONCE, only proven unit IOProc
+    if(result)s.unitDeviceCounts[3].fetch_add(1,std::memory_order_relaxed);
+    s.unitDeviceGate.deviceStartReturned(device,reinterpret_cast<std::uintptr_t>(callback),result);
+    diagnostic.stage=5;diagnostic.originalInvoked=true;diagnostic.originalStatus=result;recordDeviceIO(diagnostic);return result;
 }
 OSStatus observedDeviceStartAtTime(AudioDeviceID device,AudioDeviceIOProcID callback,AudioTimeStamp* when,UInt32 flags){
-    if(testAudioRequested()){state().refusedDeviceStarts.fetch_add(1);return kAudioHardwareIllegalOperationError;}
-    return AudioDeviceStartAtTime(device,callback,when,flags);
+    const auto caller=reinterpret_cast<std::uintptr_t>(__builtin_return_address(0));
+    if(!testAudioRequested())return AudioDeviceStartAtTime(device,callback,when,flags);
+    auto& s=state();s.unitDeviceCounts[1].fetch_add(1,std::memory_order_relaxed);
+    NativeAudioTestStats::DeviceIODiagnostic diagnostic;diagnostic.api=2;diagnostic.deviceID=device;diagnostic.suppressed=driverAuthoritySuppressed!=0;
+    const auto pair=actualStartPair(caller,true);diagnostic.pair=static_cast<std::uint32_t>(pair);deviceIOCodeIdentity(caller,diagnostic.callerSource,diagnostic.callerOffset);
+    if(!approveNestedDeviceStart(device,callback,pair,true,diagnostic)){
+        s.refusedDeviceStarts.fetch_add(1);s.unitDeviceCounts[8].fetch_add(1);recordDeviceIO(diagnostic);return kAudioHardwareIllegalOperationError;
+    }
+    s.unitDeviceCounts[2].fetch_add(1,std::memory_order_relaxed);
+    const auto result=AudioDeviceStartAtTime(device,callback,when,flags); // unchanged, ONCE
+    if(result)s.unitDeviceCounts[3].fetch_add(1,std::memory_order_relaxed);
+    s.unitDeviceGate.deviceStartReturned(device,reinterpret_cast<std::uintptr_t>(callback),result);
+    diagnostic.stage=5;diagnostic.originalInvoked=true;diagnostic.originalStatus=result;recordDeviceIO(diagnostic);return result;
+}
+// Sink calls this only AFTER acquiring its nonblocking mutation lease. No table
+// claim is held across any native API. CurrentDevice capture precedes callback
+// registration and is association-only, never permission to start IO.
+OSStatus forwardUnitSetProperty(AudioUnit unit,AudioUnitPropertyID property,AudioUnitScope scope,
+    AudioUnitElement element,const void* data,UInt32 bytes){
+    auto& s=state();
+    if(property==kAudioOutputUnitProperty_CurrentDevice){
+        s.unitDeviceGate.revokeUnit(reinterpret_cast<std::uintptr_t>(unit));
+        if(scope==kAudioUnitScope_Global&&element==0&&data&&bytes==sizeof(AudioDeviceID)&&
+           nativeApplicationAdmitted()&&s.appleProfileAdmitted&&isActualAppleHAL(unit)){
+            AudioDeviceID device=0;std::memcpy(&device,data,sizeof(device));
+            if(permittedDevice(device)){
+                auto capture=s.unitDeviceGate.beginCapture(UnitGate::Kind::CurrentDevice,reinterpret_cast<std::uintptr_t>(unit),device);
+                if(!capture){s.unitDeviceCounts[7].fetch_add(1);return kAudioUnitErr_CannotDoInCurrentContext;}
+                const auto result=AudioUnitSetProperty(unit,property,scope,element,data,bytes);
+                if(result)s.unitDeviceGate.revokeUnit(reinterpret_cast<std::uintptr_t>(unit));return result;
+            }
+        }
+    }
+    SuppressDriverAuthority suppressed;return AudioUnitSetProperty(unit,property,scope,element,data,bytes);
 }
 OSStatus observedUnitSetProperty(AudioUnit unit,AudioUnitPropertyID property,AudioUnitScope scope,
     AudioUnitElement element,const void* data,UInt32 bytes){
     auto& s=state();auto* sink=s.testSink.load(std::memory_order_acquire);
-    if(testAudioRequested()&&s.enabled.load()&&sink)
-        return sink->observedSetProperty(unit,property,scope,element,data,bytes);
+    if(testAudioRequested()&&s.enabled.load()&&sink)return sink->observedSetProperty(unit,property,scope,element,data,bytes);
     return AudioUnitSetProperty(unit,property,scope,element,data,bytes);
 }
+OSStatus observedUnitInitialize(AudioUnit unit){
+    if(!testAudioRequested())return AudioUnitInitialize(unit);
+    auto& s=state();auto* sink=s.testSink.load(std::memory_order_acquire);
+    if(!sink){SuppressDriverAuthority suppressed;return AudioUnitInitialize(unit);}
+    auto mutation=sink->tryAcquireLifecycleMutation(unit);
+    if(!mutation){s.unitDeviceCounts[7].fetch_add(1);return kAudioUnitErr_CannotDoInCurrentContext;}
+    AudioDeviceID device=0;
+    if(nativeApplicationAdmitted()&&s.appleProfileAdmitted&&actualCaptureDevice(unit,device)){
+        auto capture=s.unitDeviceGate.beginCapture(UnitGate::Kind::Initialize,reinterpret_cast<std::uintptr_t>(unit),device);
+        if(!capture){s.unitDeviceCounts[7].fetch_add(1);return kAudioUnitErr_CannotDoInCurrentContext;}
+        const auto result=AudioUnitInitialize(unit);
+        if(result)s.unitDeviceGate.revokeUnit(reinterpret_cast<std::uintptr_t>(unit));return result;
+    }
+    SuppressDriverAuthority suppressed;return AudioUnitInitialize(unit);
+}
+OSStatus observedUnitUninitialize(AudioUnit unit){
+    if(!testAudioRequested())return AudioUnitUninitialize(unit);
+    auto& s=state();auto* sink=s.testSink.load(std::memory_order_acquire);
+    auto mutation=sink?sink->tryAcquireLifecycleMutation(unit):test_output::FLTestOutputSink::LifecycleLease{};
+    if(sink&&!mutation){s.unitDeviceCounts[7].fetch_add(1);return kAudioUnitErr_CannotDoInCurrentContext;}
+    s.unitDeviceGate.revokeUnit(reinterpret_cast<std::uintptr_t>(unit));
+    SuppressDriverAuthority suppressed;return AudioUnitUninitialize(unit);
+}
+OSStatus observedComponentNew(AudioComponent component,AudioComponentInstance* instance){
+    if(!testAudioRequested())return AudioComponentInstanceNew(component,instance);
+    SuppressDriverAuthority suppressed;const auto result=AudioComponentInstanceNew(component,instance);
+    if(!result&&instance&&*instance){
+        auto& s=state();s.unitDeviceGate.revokeUnit(reinterpret_cast<std::uintptr_t>(*instance));
+        if(auto* sink=s.testSink.load(std::memory_order_acquire)){
+            auto retired=sink->tryAcquireLifecycleMutation(*instance,true,true);
+            if(!retired)s.unitDeviceCounts[7].fetch_add(1);
+        }
+    }return result;
+}
+OSStatus observedComponentDispose(AudioComponentInstance instance){
+    if(!testAudioRequested())return AudioComponentInstanceDispose(instance);
+    auto& s=state();auto* sink=s.testSink.load(std::memory_order_acquire);
+    auto mutation=sink?sink->tryAcquireLifecycleMutation(instance,true,true):test_output::FLTestOutputSink::LifecycleLease{};
+    if(sink&&!mutation){s.unitDeviceCounts[7].fetch_add(1);return kAudioUnitErr_CannotDoInCurrentContext;}
+    s.unitDeviceGate.revokeUnit(reinterpret_cast<std::uintptr_t>(instance));
+    SuppressDriverAuthority suppressed;return AudioComponentInstanceDispose(instance);
+}
 void recordOutputStart(NativeOutputStartDiagnostic diagnostic)noexcept{
-    // Neither this function nor snapshotting runs in the render callback.
     try{auto& s=state();std::lock_guard<std::mutex> guard(s.outputStartDiagnosticMutex);
         diagnostic.sequence=s.outputStartDiagnostic.sequence==UINT64_MAX?UINT64_MAX:s.outputStartDiagnostic.sequence+1;s.outputStartDiagnostic=diagnostic;}catch(...){}
+}
+bool leasedSinkStillPrepared(void* context)noexcept{
+    return context&&static_cast<test_output::FLTestOutputSink::OutputStartLease*>(context)->stillPrepared();
 }
 OSStatus observedOutputStart(AudioUnit unit){auto& s=state();if(testAudioRequested()){
     NativeOutputStartDiagnostic diagnostic;
@@ -206,7 +399,23 @@ OSStatus observedOutputStart(AudioUnit unit){auto& s=state();if(testAudioRequest
     if(!permittedDevice(device,&diagnostic))return refuse(3);
     auto* sink=s.testSink.load(std::memory_order_acquire);if(!sink)return refuse(4);
     if(!sink->tryPrepareMutedOutputStart(unit))return refuse(5);
-    diagnostic.originalInvoked=true;diagnostic.originalStatus=AudioOutputUnitStart(unit);diagnostic.stage=6;recordOutputStart(diagnostic);return diagnostic.originalStatus;
+    test_output::FLTestOutputSink::PreparedOutputTicket ticket;
+    if(!sink->capturePreparedTicket(unit,ticket))return refuse(7);
+    auto lease=sink->tryAcquirePreparedStart(ticket);
+    if(!lease||ticket.device()!=device)return refuse(7);
+    if(!s.appleProfileAdmitted)return refuse(9);
+    AudioDeviceID current=0;size=sizeof(current);
+    diagnostic.currentDeviceStatus=AudioUnitGetProperty(unit,kAudioOutputUnitProperty_CurrentDevice,kAudioUnitScope_Global,0,&current,&size);diagnostic.currentDeviceBytes=size;
+    if(diagnostic.currentDeviceStatus||size!=sizeof(current))return refuse(2);
+    if(current!=device)return refuse(10);
+    if(!permittedDevice(current,&diagnostic))return refuse(3);
+    auto capture=s.unitDeviceGate.beginOutputStart(reinterpret_cast<std::uintptr_t>(unit),device,ticket.generation(),leasedSinkStillPrepared,&lease);
+    if(!capture)return refuse(8);
+    diagnostic.originalInvoked=true;diagnostic.originalStatus=AudioOutputUnitStart(unit);
+    s.unitDeviceGate.originalStartReturned(capture,diagnostic.originalStatus);
+    if(diagnostic.originalStatus)lease.invalidateAfterFailedStart();
+    capture.close(); // closes TLS authority BEFORE releasing the Sink lease
+    diagnostic.stage=6;recordOutputStart(diagnostic);return diagnostic.originalStatus;
     }return AudioOutputUnitStart(unit);
 }
 bool testSinkAdmitted(void*)noexcept{return nativeApplicationAdmitted();}
@@ -243,8 +452,11 @@ bool initializeNativeApplication(const NativeApplicationCallbacks& callbacks)noe
     }
     s.enabled.store(true);
     if(uid){
+        s.appleComponentPath=canonical(appleAudioComponent);
+        s.appleProfileAdmitted=s.appleComponentPath==appleAudioComponent&&shaFile(s.appleComponentPath)==appleAudioComponentSHA;
         auto* sink=new(std::nothrow)test_output::FLTestOutputSink;
         test_output::Config config;config.exactAdmittedEnginePath=s.app.enginePath.c_str();config.exactTestDeviceUID=s.testDeviceUID.c_str();
+        config.functions.setProperty=forwardUnitSetProperty;
         config.functions.currentlyAdmitted=testSinkAdmitted;config.functions.verifyExactTestDevice=testSinkDevice;
         config.expectedOutputCallbackOffset=0xcd7bc0;
         if(!sink||!sink->initialize(config)){delete sink;s.enabled=false;return false;}
@@ -268,6 +480,15 @@ NativeAudioTestStats nativeAudioTestStats()noexcept{
     out.returnedShapeFailures=value.returnedShapeFailures;out.counterOverflows=value.counterOverflows;
     out.startRefusals=value.startRefusals;out.registrationRefusals=value.registrationRefusals;
     out.writeOnlyCallbackPreparations=value.writeOnlyCallbackPreparations;
+    out.sinkLifecycleRefusals=value.lifecycleRefusals;
+    out.appleDeviceProfileAdmitted=state().appleProfileAdmitted;
+    out.deviceStartEntries=state().unitDeviceCounts[0].load();out.deviceStartAtTimeEntries=state().unitDeviceCounts[1].load();
+    out.deviceStartOriginalCalls=state().unitDeviceCounts[2].load();out.deviceStartOriginalFailures=state().unitDeviceCounts[3].load();
+    out.ioProcCreateEntries=state().unitDeviceCounts[4].load();out.ioProcCreateOriginalFailures=state().unitDeviceCounts[5].load();
+    out.ioProcDestroyEntries=state().unitDeviceCounts[6].load();out.lifecycleRefusals=state().unitDeviceCounts[7].load();
+    out.unitDeviceGate=state().unitDeviceGate.snapshot();
+    out.deviceStartRefusals=state().unitDeviceCounts[8].load();out.ioProcCaptureSuppressed=state().unitDeviceCounts[9].load();out.ioProcDestroyOriginalFailures=state().unitDeviceCounts[10].load();
+    {std::lock_guard<std::mutex> guard(state().deviceIODiagnosticMutex);out.lastDeviceIO=state().deviceIODiagnostic;}
     out.criticalPropertyDisarms=value.criticalPropertyDisarms;
     const auto& registration=value.lastRegistration;auto& destination=out.lastRegistration;
     destination.stage=static_cast<std::uint32_t>(registration.stage);destination.reason=static_cast<std::uint32_t>(registration.reason);
@@ -350,5 +571,11 @@ __attribute__((used,section("__DATA,__interpose")))static const FLAppInterpose f
  {(const void*)rysup::fl_ara::observedDeviceStart,(const void*)AudioDeviceStart},
  {(const void*)rysup::fl_ara::observedDeviceStartAtTime,(const void*)AudioDeviceStartAtTime},
  {(const void*)rysup::fl_ara::observedOutputStart,(const void*)AudioOutputUnitStart},
- {(const void*)rysup::fl_ara::observedUnitSetProperty,(const void*)AudioUnitSetProperty}
+ {(const void*)rysup::fl_ara::observedUnitSetProperty,(const void*)AudioUnitSetProperty},
+ {(const void*)rysup::fl_ara::observedCreateIOProc,(const void*)AudioDeviceCreateIOProcID},
+ {(const void*)rysup::fl_ara::observedDestroyIOProc,(const void*)AudioDeviceDestroyIOProcID},
+ {(const void*)rysup::fl_ara::observedUnitInitialize,(const void*)AudioUnitInitialize},
+ {(const void*)rysup::fl_ara::observedUnitUninitialize,(const void*)AudioUnitUninitialize},
+ {(const void*)rysup::fl_ara::observedComponentNew,(const void*)AudioComponentInstanceNew},
+ {(const void*)rysup::fl_ara::observedComponentDispose,(const void*)AudioComponentInstanceDispose}
 };

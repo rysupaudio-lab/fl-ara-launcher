@@ -25,6 +25,12 @@ def sanitized_manifest(raw, helper, root):
         if result['runtime_admission_scope']!='owned-qualification-candidate' or any(result[k] for k in FLAGS):
             raise ValueError('Routing-only candidate cannot claim runtime qualification')
         result.update(restrictions);result['intended_runtime_scope']=scope
+    if 'candidate_kind' in raw:
+        if raw['candidate_kind']!='full-compiled-device-gate-unqualified' or raw.get('device_start_admission_compiled') is not True or raw.get('actual_audio_io_qualified') is not False:
+            raise ValueError('Compiled device-gate candidate metadata is inconsistent')
+        if raw.get('routing_only') is True or result['runtime_admission_scope']!='owned-qualification-candidate' or any(result[k] for k in FLAGS):
+            raise ValueError('Compiled device-gate candidate remains runtime unqualified')
+        result.update(candidate_kind=raw['candidate_kind'],device_start_admission_compiled=True,actual_audio_io_qualified=False)
     revision=raw.get('source_revision')
     if revision is None:
         revision=subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()

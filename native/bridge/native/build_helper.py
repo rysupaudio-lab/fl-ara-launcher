@@ -50,7 +50,7 @@ def main() -> int:
     (output/'helper.json').write_text(json.dumps({'schema':'rysup.fl-ara-helper/1',
         'runtime_ready':False,'binary':'FLAppBridge.dylib','sha256':None,
         'compile_passed':False,'status':'building'}, indent=2)+'\n')
-    sources = [here/'FLAppBridge.mm', here/'FLNativeApplication.mm', here/'FLVST3NativeHooks.cpp', here/'FLStandaloneSourceOverlay.cpp', here/'FLNativeProcessObserver.cpp', here/'FLNativeMixBoundary.cpp', here/'RegistrationReadThrough.mm', here/'FLNativeSaveGuard.mm', here/'FLTestOutputSink.cpp',
+    sources = [here/'FLAppBridge.mm', here/'FLNativeApplication.mm', here/'FLVST3NativeHooks.cpp', here/'FLStandaloneSourceOverlay.cpp', here/'FLNativeProcessObserver.cpp', here/'FLNativeMixBoundary.cpp', here/'RegistrationReadThrough.mm', here/'FLNativeSaveGuard.mm', here/'FLTestOutputSink.cpp', here/'FLUnitDeviceGate.cpp',
                host/'FLStandaloneGraphDecoder.cpp', host/'FLStandaloneStateEnvelope.cpp', host/'GenericARAHost.cpp', host/'VST3ARAEntry.cpp',
                host/'OwnedVST3PlaybackCompanion.cpp', host/'StandaloneARACoordinator.cpp', old/'FLNativeModel.cpp',
                ara/'ARA_Library/Dispatch/ARAHostDispatch.cpp', ara/'ARA_Library/Debug/ARADebug.c',
@@ -70,6 +70,8 @@ def main() -> int:
         language = ['-std=c++17'] if source.suffix != '.c' else ['-std=c11', '-x', 'c']
         if source.suffix == '.mm':
             language += ['-fobjc-arc']
+        if source.name == 'FLNativeApplication.mm':
+            language += ['-fptrauth-intrinsics']
         obj = output / f'{index:02d}-{source.stem}.o'
         cmd = [args.compiler, *common, *language, '-fsyntax-only' if args.syntax_only else '-c', str(source)]
         if not args.syntax_only:

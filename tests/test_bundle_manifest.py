@@ -25,4 +25,13 @@ class PublicManifest(unittest.TestCase):
    for change in [{'device_start_fix':True},{'no_audio_io_qualification':False},{'routing_only':'true'},{'runtime_qualified':True},{'intended_runtime_scope':'/Users/private/untrusted'}]:
     with self.subTest(change=change):
      with self.assertRaises(ValueError):m.sanitized_manifest(dict(self.routing_fixture(helper),**change),helper,root)
+ def test_compiled_device_gate_metadata_preserves_unqualified_scope(self):
+  with tempfile.TemporaryDirectory() as folder:
+   root=Path(folder);helper=root/'FLAppBridge.dylib';helper.write_bytes(b'helper')
+   raw={'schema':'rysup.fl-ara-helper/1','binary':helper.name,'runtime_ready':True,'source_revision':'a'*40,'candidate_kind':'full-compiled-device-gate-unqualified','device_start_admission_compiled':True,'actual_audio_io_qualified':False}
+   value=m.sanitized_manifest(raw,helper,root);self.assertEqual(value,m.sanitized_manifest(value,helper,root))
+   self.assertIs(value['device_start_admission_compiled'],True);self.assertIs(value['actual_audio_io_qualified'],False);self.assertNotIn('routing_only',value)
+   for change in [{'actual_audio_io_qualified':True},{'device_start_admission_compiled':False},{'runtime_qualified':True},{'candidate_kind':'qualified'}]:
+    with self.subTest(change=change):
+     with self.assertRaises(ValueError):m.sanitized_manifest(dict(raw,**change),helper,root)
 if __name__=='__main__':unittest.main()

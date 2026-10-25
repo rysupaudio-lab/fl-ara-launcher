@@ -5,7 +5,7 @@ import Darwin
 import CoreServices
 import UniformTypeIdentifiers
 
-let launcherVersion = "0.1.0-candidate.1"
+let launcherVersion = "0.1.0-candidate.7"
 let enginePath = "Contents/Libs/FLEngine_x64.dylib"
 let executablePath = "Contents/MacOS/OsxFL"
 let engineHash = "8d23eebf0fc63fdd1957ba2c8d0f1f1d4e053a9f43173d3c22606c47ace7b76d"

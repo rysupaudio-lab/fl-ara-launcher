@@ -4,18 +4,20 @@
 #include <cstdlib>
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
+#include <pthread.h>
 
 namespace rysup::fl_ara::test_output {
 namespace {
 enum Counter {Calls,NativeCalls,NativeFrames,Nonzero,Nonfinite,Muted,Unsupported,
-    Concurrent,NativeErrors,ReturnedShape,UnsafeHardware,Overflow,Registration,Start,Prepared,WriteOnly,CriticalDisarm};
+    Concurrent,NativeErrors,ReturnedShape,UnsafeHardware,Overflow,Registration,Start,Prepared,WriteOnly,CriticalDisarm,LifecycleRefused};
 constexpr OSStatus rejected=kAudioUnitErr_CannotDoInCurrentContext;
 static_assert(std::atomic<bool>::is_always_lock_free);
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 struct Claim {
     std::atomic<bool>& state;bool held=false;
     explicit Claim(std::atomic<bool>& s):state(s){bool expected=false;held=state.compare_exchange_strong(expected,true,std::memory_order_acq_rel);}
-    ~Claim(){if(held)state.store(false,std::memory_order_release);}
+    void release(){if(held){state.store(false,std::memory_order_release);held=false;}}
+    ~Claim(){release();}
 };
 }
 void FLTestOutputSink::bump(unsigned n,std::uint64_t amount) noexcept {
@@ -27,6 +29,95 @@ void FLTestOutputSink::bump(unsigned n,std::uint64_t amount) noexcept {
     // One nonspinning attempt. Under simultaneous device callbacks totals are
     // monotonic lower bounds; an existing increment caused any failed attempt.
     counters[n].compare_exchange_strong(previous,previous+amount,std::memory_order_relaxed);
+}
+void FLTestOutputSink::invalidateRecord(Record& r,bool registration)noexcept{
+    r.armed.store(false,std::memory_order_release);
+    if(registration)r.registrationSucceeded.store(false,std::memory_order_release);
+    const auto generation=r.preparationGeneration.load(std::memory_order_relaxed);
+    if(generation==UINT64_MAX){r.retired.store(true,std::memory_order_release);bump(Overflow);}
+    else r.preparationGeneration.store(generation+1,std::memory_order_release);
+}
+void FLTestOutputSink::OutputStartLease::release()noexcept{
+    if(record_&&record_->lifecycleSlot){
+        if(thread_==reinterpret_cast<std::uintptr_t>(pthread_self())){
+            record_->lifecycleSlot->thread.store(0,std::memory_order_relaxed);record_->lifecycleSlot->state.store(0,std::memory_order_release);
+        }else if(owner_){owner_->invalidateRecord(*record_,false);owner_->bump(LifecycleRefused);} // never release another thread's active lease
+    }
+    record_=nullptr;owner_=nullptr;
+}
+FLTestOutputSink::OutputStartLease::~OutputStartLease(){release();}
+FLTestOutputSink::OutputStartLease::OutputStartLease(OutputStartLease&& o)noexcept
+    :owner_(o.owner_),record_(o.record_),ticket_(o.ticket_),thread_(o.thread_){o.owner_=nullptr;o.record_=nullptr;}
+FLTestOutputSink::OutputStartLease& FLTestOutputSink::OutputStartLease::operator=(OutputStartLease&& o)noexcept{
+    if(this!=&o){release();owner_=o.owner_;record_=o.record_;ticket_=o.ticket_;thread_=o.thread_;o.owner_=nullptr;o.record_=nullptr;}return *this;
+}
+bool FLTestOutputSink::OutputStartLease::stillPrepared()const noexcept{
+    return owner_&&record_&&record_->lifecycleSlot&&thread_==reinterpret_cast<std::uintptr_t>(pthread_self())&&
+        record_->lifecycleSlot->state.load(std::memory_order_acquire)==1&&owner_->authorizePreparedTicket(ticket_);
+}
+void FLTestOutputSink::OutputStartLease::invalidateAfterFailedStart()noexcept{
+    if(owner_&&record_&&thread_==reinterpret_cast<std::uintptr_t>(pthread_self()))owner_->invalidateRecord(*record_,false);
+}
+void FLTestOutputSink::LifecycleLease::release()noexcept{
+    if(slot_&&owner_){
+        if(thread_!=reinterpret_cast<std::uintptr_t>(pthread_self())){owner_->bump(LifecycleRefused);if(record_)owner_->invalidateRecord(*record_,true);}
+        else {
+            if(record_&&retire_)record_->retired.store(true,std::memory_order_release);
+            slot_->thread.store(0,std::memory_order_relaxed);slot_->state.store(0,std::memory_order_release);
+            if(!slot_->boundRecord.load(std::memory_order_acquire)){
+                Claim pool(owner_->lifecyclePoolClaimed);
+                if(pool.held&&!slot_->state.load(std::memory_order_acquire)&&!slot_->boundRecord.load(std::memory_order_acquire))slot_->unit.store(0,std::memory_order_release);
+            }
+        }
+    }
+    owner_=nullptr;record_=nullptr;slot_=nullptr;untracked_=false;
+}
+FLTestOutputSink::LifecycleLease::~LifecycleLease(){release();}
+FLTestOutputSink::LifecycleLease::LifecycleLease(LifecycleLease&& o)noexcept
+    :owner_(o.owner_),record_(o.record_),slot_(o.slot_),thread_(o.thread_),untracked_(o.untracked_),retire_(o.retire_){o.owner_=nullptr;o.record_=nullptr;o.slot_=nullptr;o.untracked_=false;}
+FLTestOutputSink::LifecycleLease& FLTestOutputSink::LifecycleLease::operator=(LifecycleLease&& o)noexcept{
+    if(this!=&o){release();owner_=o.owner_;record_=o.record_;slot_=o.slot_;thread_=o.thread_;untracked_=o.untracked_;retire_=o.retire_;o.owner_=nullptr;o.record_=nullptr;o.slot_=nullptr;o.untracked_=false;}return *this;
+}
+FLTestOutputSink::LifecycleLease FLTestOutputSink::tryAcquireLifecycleMutation(AudioUnit unit,bool retire,bool registration)noexcept{
+    LifecycleLease out;if(!unit){out.untracked_=true;return out;}
+    Claim pool(lifecyclePoolClaimed);if(!pool.held){bump(LifecycleRefused);return out;}
+    const auto identity=reinterpret_cast<std::uintptr_t>(unit);LifecycleSlot* slot=nullptr;
+    for(auto& candidate:lifecycleSlots)if(candidate.unit.load(std::memory_order_acquire)==identity){slot=&candidate;break;}
+    if(!slot)for(auto& candidate:lifecycleSlots)if(!candidate.state.load(std::memory_order_acquire)&&!candidate.boundRecord.load(std::memory_order_acquire)){slot=&candidate;break;}
+    if(!slot){bump(LifecycleRefused);return out;}
+    std::uint32_t expected=0;if(!slot->state.compare_exchange_strong(expected,2,std::memory_order_acq_rel)){bump(LifecycleRefused);return out;}
+    slot->unit.store(identity,std::memory_order_release);slot->thread.store(reinterpret_cast<std::uintptr_t>(pthread_self()),std::memory_order_release);
+    auto* r=find(unit);if(r&&r->lifecycleSlot!=slot){slot->state.store(0,std::memory_order_release);bump(LifecycleRefused);return out;}
+    out.owner_=this;out.record_=r;out.slot_=slot;out.thread_=reinterpret_cast<std::uintptr_t>(pthread_self());out.retire_=retire;
+    if(r)invalidateRecord(*r,registration);return out;
+}
+bool FLTestOutputSink::unitMutationHeldByCurrentThread(AudioUnit unit)const noexcept{
+    const auto identity=reinterpret_cast<std::uintptr_t>(unit),thread=reinterpret_cast<std::uintptr_t>(pthread_self());
+    for(const auto& slot:lifecycleSlots)if(slot.unit.load(std::memory_order_acquire)==identity&&slot.state.load(std::memory_order_acquire)==2&&slot.thread.load(std::memory_order_acquire)==thread)return true;
+    return false;
+}
+bool FLTestOutputSink::capturePreparedTicket(AudioUnit unit,PreparedOutputTicket& out)const noexcept{
+    for(std::size_t i=0;i<records.size();++i){const auto& r=records[i];
+        if(!r.published.load(std::memory_order_acquire)||r.unit!=unit||r.retired.load(std::memory_order_acquire))continue;
+        PreparedOutputTicket ticket;ticket.unit_=unit;ticket.record_=i+1;ticket.device_=r.preparedDevice.load(std::memory_order_acquire);ticket.generation_=r.preparationGeneration.load(std::memory_order_acquire);
+        if(authorizePreparedTicket(ticket)){out=ticket;return true;}return false;
+    }return false;
+}
+bool FLTestOutputSink::authorizePreparedTicket(const PreparedOutputTicket& t)const noexcept{
+    if(!t.record_||t.record_>records.size()||!t.unit_||!t.device_||!t.generation_)return false;
+    const auto& r=records[t.record_-1];
+    return r.published.load(std::memory_order_acquire)&&r.unit==t.unit_&&!r.retired.load(std::memory_order_acquire)&&r.lifecycleSlot&&
+        r.lifecycleSlot->unit.load(std::memory_order_acquire)==reinterpret_cast<std::uintptr_t>(t.unit_)&&r.lifecycleSlot->state.load(std::memory_order_acquire)!=2&&r.armed.load(std::memory_order_acquire)&&
+        r.registrationSucceeded.load(std::memory_order_acquire)&&r.preparedDevice.load(std::memory_order_acquire)==t.device_&&
+        r.preparationGeneration.load(std::memory_order_acquire)==t.generation_;
+}
+FLTestOutputSink::OutputStartLease FLTestOutputSink::tryAcquirePreparedStart(const PreparedOutputTicket& ticket)noexcept{
+    OutputStartLease out;if(!ticket.record_||ticket.record_>records.size()){bump(LifecycleRefused);return out;}
+    auto& r=records[ticket.record_-1];if(!r.lifecycleSlot){bump(LifecycleRefused);return out;}std::uint32_t expected=0;
+    if(!r.lifecycleSlot->state.compare_exchange_strong(expected,1,std::memory_order_acq_rel)){bump(LifecycleRefused);return out;}
+    if(!authorizePreparedTicket(ticket)){r.lifecycleSlot->state.store(0,std::memory_order_release);bump(LifecycleRefused);return out;}
+    const auto thread=reinterpret_cast<std::uintptr_t>(pthread_self());r.lifecycleSlot->thread.store(thread,std::memory_order_release);
+    out.owner_=this;out.record_=&r;out.ticket_=ticket;out.thread_=thread;return out;
 }
 bool FLTestOutputSink::initialize(const Config& c) noexcept {
     Claim guard(configuring);if(!guard.held||initialized.load())return false;
@@ -47,7 +138,7 @@ bool FLTestOutputSink::isOutputUnit(AudioUnit unit,const Functions& f) noexcept 
     return component&&!f.getDescription(component,&d)&&d.componentType==kAudioUnitType_Output;
 }
 FLTestOutputSink::Record* FLTestOutputSink::find(AudioUnit unit) noexcept {
-    for(auto& r:records)if(r.published.load(std::memory_order_acquire)&&r.unit==unit)return &r;
+    for(auto& r:records)if(r.published.load(std::memory_order_acquire)&&!r.retired.load(std::memory_order_acquire)&&r.unit==unit)return &r;
     return nullptr;
 }
 void FLTestOutputSink::publishRegistration(const RegistrationDiagnostic& d) noexcept {
@@ -113,8 +204,8 @@ OSStatus FLTestOutputSink::observedSetProperty(AudioUnit unit,AudioUnitPropertyI
     RegistrationDiagnostic diagnostic;diagnostic.property=property;diagnostic.scope=scope;
     diagnostic.element=element;diagnostic.bytes=size;
     auto* record=find(unit);diagnostic.recordPresent=record!=nullptr;
-    const auto refuse=[&](RegistrationReason reason){
-        if(record){record->armed.store(false,std::memory_order_release);record->registrationSucceeded.store(false,std::memory_order_release);}
+    const auto refuse=[&](RegistrationReason reason,bool revoke=true){
+        if(record&&revoke)invalidateRecord(*record,true);
         diagnostic.stage=RegistrationStage::RefusedBeforeOriginal;diagnostic.reason=reason;
         publishRegistration(diagnostic);bump(Registration);return rejected;
     };
@@ -124,10 +215,16 @@ OSStatus FLTestOutputSink::observedSetProperty(AudioUnit unit,AudioUnitPropertyI
            property==kAudioOutputUnitProperty_CurrentDevice||property==kAudioOutputUnitProperty_EnableIO||
            property==kAudioOutputUnitProperty_ChannelMap||property==kAudioUnitProperty_AudioChannelLayout||
            property==kAudioUnitProperty_ElementCount){
-            if(record&&record->armed.exchange(false,std::memory_order_acq_rel))bump(CriticalDisarm);
+            auto mutation=tryAcquireLifecycleMutation(unit);
+            if(!mutation)return rejected;
+            if(record)bump(CriticalDisarm);
+            return functions.setProperty(unit,property,scope,element,data,size);
         }
         return functions.setProperty(unit,property,scope,element,data,size);
     }
+    auto mutation=tryAcquireLifecycleMutation(unit,false,true);
+    if(!mutation)return refuse(RegistrationReason::LifecycleBusy,false);
+    record=mutation.record_;diagnostic.recordPresent=record!=nullptr; // leased authority, not pre-acquire snapshot
     if(!functions.currentlyAdmitted(functions.context))return refuse(RegistrationReason::NotAdmitted);
     if(!isOutputUnit(unit,functions))return functions.setProperty(unit,property,scope,element,data,size);
     Claim guard(configuring);diagnostic.claimHeld=guard.held;
@@ -138,7 +235,8 @@ OSStatus FLTestOutputSink::observedSetProperty(AudioUnit unit,AudioUnitPropertyI
     if(size!=sizeof(AURenderCallbackStruct))return refuse(RegistrationReason::WrongDataBytes);
     auto requested=*static_cast<const AURenderCallbackStruct*>(data);
     if(!requested.inputProc){
-        if(record){record->armed.store(false,std::memory_order_release);record->registrationSucceeded.store(false,std::memory_order_release);}
+        if(record)invalidateRecord(*record,true);
+        guard.release();
         diagnostic.originalInvoked=true;
         diagnostic.originalStatus=functions.setProperty(unit,property,scope,element,data,size);
         diagnostic.stage=diagnostic.originalStatus?RegistrationStage::OriginalFailed:RegistrationStage::Removed;
@@ -167,10 +265,13 @@ OSStatus FLTestOutputSink::observedSetProperty(AudioUnit unit,AudioUnitPropertyI
         for(auto& candidate:records)if(!candidate.published.load(std::memory_order_acquire)){record=&candidate;break;}
         if(!record)return refuse(RegistrationReason::PoolExhausted);
         record->unit=unit;record->owner=this;record->original=requested;
+        record->lifecycleSlot=mutation.slot_;mutation.record_=record;mutation.slot_->boundRecord.store(true,std::memory_order_release);
         record->registeredScope=scope;record->registeredElement=element;
         record->published.store(true,std::memory_order_release);
     }
+    if(!mutation.owner_){mutation=tryAcquireLifecycleMutation(unit,false,true);if(!mutation)return refuse(RegistrationReason::LifecycleBusy,false);}
     AURenderCallbackStruct wrapped{render,record};
+    guard.release(); // no pool/table claim spans a foreign API call
     record->registrationSucceeded.store(false,std::memory_order_release);diagnostic.originalInvoked=true;
     diagnostic.originalStatus=functions.setProperty(unit,property,scope,element,&wrapped,sizeof(wrapped));
     if(diagnostic.originalStatus){record->armed.store(false,std::memory_order_release);bump(Registration);diagnostic.stage=RegistrationStage::OriginalFailed;diagnostic.reason=RegistrationReason::OriginalSetterFailed;}
@@ -196,8 +297,10 @@ bool FLTestOutputSink::tryPrepareMutedOutputStart(AudioUnit unit) noexcept {
     CallbackMetadataDiagnostic metadata;
     const auto refuse=[&](Record* r){if(r)r->armed.store(false,std::memory_order_release);publishMetadata(metadata);bump(Start);return false;};
     if(!initialized.load(std::memory_order_acquire))return refuse(nullptr);
-    Claim guard(configuring);auto* r=find(unit);
-    if(!guard.held||!r||!r->registrationSucceeded.load(std::memory_order_acquire)||!functions.currentlyAdmitted(functions.context)||!isOutputUnit(unit,functions))return refuse(r);
+    auto mutation=tryAcquireLifecycleMutation(unit);
+    auto* r=mutation.record_;
+    if(!mutation){publishMetadata(metadata);bump(Start);return false;}
+    if(!r||!r->registrationSucceeded.load(std::memory_order_acquire)||!functions.currentlyAdmitted(functions.context)||!isOutputUnit(unit,functions))return refuse(r);
     metadata.registeredScope=r->registeredScope;metadata.registeredElement=r->registeredElement;
     AURenderCallbackStruct callback{};UInt32 size=sizeof(callback);
     metadata.routeQueried=true;
@@ -246,7 +349,8 @@ bool FLTestOutputSink::tryPrepareMutedOutputStart(AudioUnit unit) noexcept {
     if(functions.getProperty(unit,kAudioUnitProperty_MaximumFramesPerSlice,kAudioUnitScope_Global,0,&maximum,&size)||
        size!=sizeof(maximum)||!maximum||maximum>maximumFrames)return refuse(r);
     if(r->preparedBefore){if(!sameFormat(r->format,format)||r->maximumSliceFrames!=maximum)return refuse(r);}
-    else {r->format=format;r->maximumSliceFrames=maximum;r->preparedBefore=true;bump(Prepared);}
+    else {r->format=format;r->maximumSliceFrames=maximum;r->preparedDevice.store(device,std::memory_order_relaxed);r->preparedBefore=true;bump(Prepared);}
+    if(r->preparedDevice.load(std::memory_order_relaxed)!=device)return refuse(r);
     if(writeOnly)bump(WriteOnly);
     publishMetadata(metadata);
     r->armed.store(true,std::memory_order_release);return true;
@@ -329,7 +433,7 @@ OSStatus FLTestOutputSink::render(void* context,AudioUnitRenderActionFlags* flag
     return status?status:((okay&&zeroed)?noErr:rejected);
 }
 Stats FLTestOutputSink::snapshot() const noexcept {
-    std::uint64_t v[17];for(unsigned i=0;i!=17;++i)v[i]=counters[i].load(std::memory_order_relaxed);
-    return {v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],v[13],v[14],v[15],v[16],registrationSnapshot(),metadataSnapshot()};
+    std::uint64_t v[18];for(unsigned i=0;i!=18;++i)v[i]=counters[i].load(std::memory_order_relaxed);
+    return {v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],v[13],v[14],v[15],v[16],v[17],registrationSnapshot(),metadataSnapshot()};
 }
 } // namespace rysup::fl_ara::test_output

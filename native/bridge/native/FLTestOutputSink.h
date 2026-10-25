@@ -35,7 +35,7 @@ enum class RegistrationReason:std::uint32_t {
     None=0,NotInitialized=1,NotAdmitted=2,ConfigurationBusy=3,UnsupportedScope=4,
     UnsupportedElement=5,MissingData=6,WrongDataBytes=7,SelfCallback=8,NoCallbackImage=9,
     CallbackPathUnresolved=10,CallbackNotEngine=11,CallbackChanged=12,RefconChanged=13,
-    RegistrationRouteChanged=14,PoolExhausted=15,OriginalSetterFailed=16,CallbackOffsetMismatch=17
+    RegistrationRouteChanged=14,PoolExhausted=15,OriginalSetterFailed=16,CallbackOffsetMismatch=17,LifecycleBusy=18
 };
 enum class CallbackSource:std::uint32_t {NotInspected=0,ExactEngine=1,OwnedExecutable=2,OtherImage=3,NoImage=4,SelfWrapper=5};
 struct RegistrationDiagnostic {
@@ -62,12 +62,54 @@ struct Stats {
     std::uint64_t registrationRefusals=0,startRefusals=0,preparedUnits=0;
     std::uint64_t writeOnlyCallbackPreparations=0;
     std::uint64_t criticalPropertyDisarms=0;
+    std::uint64_t lifecycleRefusals=0;
     RegistrationDiagnostic lastRegistration{};
     CallbackMetadataDiagnostic callbackMetadata{};
 };
 
 class FLTestOutputSink final {
+    struct Record;
+    struct LifecycleSlot;
 public:
+    class PreparedOutputTicket {
+    public:
+        PreparedOutputTicket() noexcept=default;
+        AudioUnit unit()const noexcept{return unit_;}
+        std::uint32_t device()const noexcept{return device_;}
+        std::uint64_t generation()const noexcept{return generation_;}
+        std::uint64_t identity()const noexcept{return record_;}
+    private:
+        friend class FLTestOutputSink;
+        AudioUnit unit_=nullptr;std::uint32_t device_=0;std::uint64_t generation_=0,record_=0;
+    };
+    class OutputStartLease {
+    public:
+        OutputStartLease()noexcept=default;~OutputStartLease();
+        OutputStartLease(const OutputStartLease&)=delete;OutputStartLease& operator=(const OutputStartLease&)=delete;
+        OutputStartLease(OutputStartLease&&)noexcept;OutputStartLease& operator=(OutputStartLease&&)noexcept;
+        explicit operator bool()const noexcept{return owner_!=nullptr;}
+        const PreparedOutputTicket& ticket()const noexcept{return ticket_;}
+        bool stillPrepared()const noexcept;
+        void invalidateAfterFailedStart()noexcept;
+    private:
+        friend class FLTestOutputSink;
+        FLTestOutputSink* owner_=nullptr;Record* record_=nullptr;PreparedOutputTicket ticket_;
+        std::uintptr_t thread_=0;
+        void release()noexcept;
+    };
+    class LifecycleLease {
+    public:
+        LifecycleLease()noexcept=default;~LifecycleLease();
+        LifecycleLease(const LifecycleLease&)=delete;LifecycleLease& operator=(const LifecycleLease&)=delete;
+        LifecycleLease(LifecycleLease&&)noexcept;LifecycleLease& operator=(LifecycleLease&&)noexcept;
+        // Untracked units are permitted for ordinary original forwarding.
+        explicit operator bool()const noexcept{return untracked_||owner_!=nullptr;}
+    private:
+        friend class FLTestOutputSink;
+        FLTestOutputSink* owner_=nullptr;Record* record_=nullptr;LifecycleSlot* slot_=nullptr;
+        std::uintptr_t thread_=0;bool untracked_=false,retire_=false;
+        void release()noexcept;
+    };
     static constexpr std::size_t maximumUnits=8,maximumFrames=8192;
     static constexpr std::size_t scratchBytes=maximumFrames*2*sizeof(double);
     static constexpr std::size_t maximumZeroBytes=256*1024;
@@ -83,10 +125,23 @@ public:
         AudioUnitElement,const void*,UInt32) noexcept;
     // Non-RT, before the real AudioOutputUnitStart. False means DO NOT start.
     bool tryPrepareMutedOutputStart(AudioUnit) noexcept;
+    bool capturePreparedTicket(AudioUnit,PreparedOutputTicket&)const noexcept;
+    bool authorizePreparedTicket(const PreparedOutputTicket&)const noexcept;
+    OutputStartLease tryAcquirePreparedStart(const PreparedOutputTicket&)noexcept;
+    // No waiting: a held start/configuration lease refuses competing lifecycle
+    // originals. Root must hold this result through uninit/dispose originals.
+    LifecycleLease tryAcquireLifecycleMutation(AudioUnit,bool retireUnit=false,
+        bool revokeRegistration=false)noexcept;
+    bool unitMutationHeldByCurrentThread(AudioUnit)const noexcept;
     // Numeric-only independent atomic counters (not one transactional epoch).
     Stats snapshot() const noexcept;
 private:
     struct List2 { UInt32 mNumberBuffers=0;AudioBuffer mBuffers[2]{}; };
+    struct LifecycleSlot {
+        std::atomic<std::uintptr_t> unit{0},thread{0};
+        std::atomic<std::uint32_t> state{0}; // 0 idle,1 start,2 mutation
+        std::atomic<bool> boundRecord{false};
+    };
     struct Record {
         FLTestOutputSink* owner=nullptr;
         AudioUnit unit=nullptr;
@@ -96,6 +151,10 @@ private:
         UInt32 maximumSliceFrames=0;
         bool preparedBefore=false;
         std::atomic<bool> published{false},armed{false},rendering{false},registrationSucceeded{false};
+        std::atomic<bool> retired{false};
+        LifecycleSlot* lifecycleSlot=nullptr;
+        std::atomic<std::uint32_t> preparedDevice{0};
+        std::atomic<std::uint64_t> preparationGeneration{1};
         alignas(16) std::array<std::byte,scratchBytes> scratch{};
         List2 list{};
     };
@@ -110,6 +169,7 @@ private:
     bool returnedShape(const Record&,UInt32) const noexcept;
     void inspectScratch(const Record&,UInt32) noexcept;
     void bump(unsigned,std::uint64_t=1) noexcept;
+    void invalidateRecord(Record&,bool revokeRegistration)noexcept;
     void publishRegistration(const RegistrationDiagnostic&) noexcept;
     RegistrationDiagnostic registrationSnapshot() const noexcept;
     void publishMetadata(const CallbackMetadataDiagnostic&) noexcept;
@@ -119,7 +179,9 @@ private:
     std::array<char,4096> ownedExecutablePath{};
     std::uint64_t expectedOutputCallbackOffset=0;
     std::array<Record,maximumUnits> records{};
-    std::array<std::atomic<std::uint64_t>,17> counters{};
+    std::array<LifecycleSlot,32> lifecycleSlots{};
+    std::atomic<bool> lifecyclePoolClaimed{false};
+    std::array<std::atomic<std::uint64_t>,18> counters{};
     std::atomic<bool> initialized{false},configuring{false};
     std::atomic<bool> diagnosticPublishing{false};
     std::atomic<std::uint64_t> diagnosticSequence{0},diagnosticDropped{0};

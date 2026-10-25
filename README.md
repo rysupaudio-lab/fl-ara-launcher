@@ -13,7 +13,8 @@ no Image-Line application files, third-party plugins, or license keys are shippe
 
 - Verify the exact OsxFL and FLEngine SHA-256 pins and original Image-Line Team
   N68WEP5ZZZ signature, before and after each session.
-- Refuse while another OsxFL application is running. Never attach, hide, adopt,
+- Permit unrelated installed FL instances and independent launcher copies using
+  distinct cache roots. Never attach, hide, adopt,
   signal, or terminate a pre-existing/user FL instance.
 - Make a signature-preserving APFS clone under an owned cache run UUID. Cross-volume
   full copying is allowed only on the explicitly selected mounted Razer SSD after

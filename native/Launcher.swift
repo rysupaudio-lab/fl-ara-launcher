@@ -170,6 +170,9 @@ struct HandlerDecision {
 func handlerDecision(original: String?, current: String?) -> HandlerDecision { HandlerDecision(original: original, current: current) }
 // Enumerate exact executable paths, including unbridged duplicates created by
 // LaunchServices or another UI tool. Never signal or adopt any of these PIDs.
+func exactPrivateProcessPIDs(_ observed: [(pid: Int32, path: String)], expectedPhysicalPath: String) -> [Int32] {
+    observed.filter { $0.path == expectedPhysicalPath }.map { $0.pid }.sorted()
+}
 func liveExactProcesses(_ executable: URL) throws -> [Int32] {
     guard let handle = dlopen("/usr/lib/libproc.dylib", RTLD_NOW | RTLD_LOCAL) else { throw fail("Cannot verify all processes before cleanup; preserve this app copy.") }
     defer { dlclose(handle) }
@@ -183,13 +186,13 @@ func liveExactProcesses(_ executable: URL) throws -> [Int32] {
     let count = pids.withUnsafeMutableBytes { list($0.baseAddress, Int32($0.count)) }
     guard count >= 0, count < pids.count else { throw fail("Process inventory changed too quickly; preserve this app copy.") }
     let expected = physicalPath(executable)
-    var matches: [Int32] = []
+    var observed: [(pid: Int32, path: String)] = []
     for pid in pids.prefix(Int(count)) where pid > 0 {
         var bytes = [CChar](repeating: 0, count: 4096)
         let length = bytes.withUnsafeMutableBytes { path(pid, $0.baseAddress, UInt32($0.count)) }
-        if length > 0, String(cString: bytes) == expected { matches.append(pid) }
+        if length > 0 { observed.append((pid, String(cString: bytes))) }
     }
-    return matches.sorted()
+    return exactPrivateProcessPIDs(observed, expectedPhysicalPath: expected)
 }
 func sourceLogicalBytes(_ source: URL) throws -> UInt64 {
     var traversalError: Error?
@@ -341,8 +344,6 @@ final class Session {
         if admission["runtime_admission_scope"] as? String == "bare-startup-test-only" {
             guard testDevice == "Pro Tools Audio Bridge 2-A_UID", project == nil else { throw fail("This owner-local test candidate admits only a blank startup with the exact virtual test device; project loading and normal audio are disabled.") }
         }
-        let existing = try command("/bin/ps", ["-axo", "comm="]).split(separator: "\n").contains { URL(fileURLWithPath: String($0).trimmingCharacters(in: .whitespaces)).lastPathComponent == "OsxFL" }
-        guard !existing else { throw fail("An FL Studio application is already running. Leave that session intact and quit it normally before launching the private copy.") }
         let source = canonical(source)
         var receipt = try inspect(source)
         guard fm.fileExists(atPath: helper.path), !helper.path.contains(":") else { throw fail("The bundled native bridge is missing or its path contains a colon.") }
@@ -565,6 +566,21 @@ func selfTest() throws {
     guard devices.count == 1, devices[0].stringValue == "4Pro Tools Audio Bridge 2-A" else { throw fail("Test-only native device registry setting is incorrect.") }
     let own = try liveExactProcesses(URL(fileURLWithPath: CommandLine.arguments[0]))
     guard own.contains(getpid()) else { throw fail("Exact executable inventory failed to find this process.") }
+    let privateExe = physicalPath(base.appendingPathComponent("owned-a/FL Studio 2026.app/Contents/MacOS/OsxFL"))
+    let independentInstances: [(pid: Int32, path: String)] = [
+        (101, "/Applications/FL Studio 2026.app/Contents/MacOS/OsxFL"),
+        (102, physicalPath(base.appendingPathComponent("owned-b/FL Studio 2026.app/Contents/MacOS/OsxFL"))),
+        (103, privateExe + "-other")
+    ]
+    let unrelated = exactPrivateProcessPIDs(independentInstances, expectedPhysicalPath: privateExe)
+    let oneOwned = exactPrivateProcessPIDs(independentInstances + [(104, privateExe)], expectedPhysicalPath: privateExe)
+    let duplicated = exactPrivateProcessPIDs(independentInstances + [(104, privateExe), (105, privateExe)], expectedPhysicalPath: privateExe)
+    guard unrelated.isEmpty, oneOwned == [104], oneOwned.filter({ $0 != 104 }).isEmpty,
+          duplicated.filter({ $0 != 104 }) == [105],
+          sessionCleanupDecision(childRunning: false, exactPrivatePIDs: unrelated) == .removeExitedCopy,
+          sessionCleanupDecision(childRunning: false, exactPrivatePIDs: duplicated) == .preserveExactPrivateProcesses else {
+        throw fail("Independent FL instances were blocked or exact-copy duplicate protection failed.")
+    }
     let link = base.appendingPathComponent("escape")
     try fm.createSymbolicLink(at: link, withDestinationURL: base)
     do { try rejectSymlinkAncestors(link.appendingPathComponent("nested")); throw fail("Symlink admitted.") }
@@ -616,7 +632,7 @@ func selfTest() throws {
           ![unchanged,userChanged,notOurs,unknown].contains(where: { $0.defaultWriteAuthorized }) else {
         throw fail("Default-handler preservation decision authorized a write or misclassified a user choice.")
     }
-    print("PASS UTF-16 template path boundary/non-BMP/refuse-before-copy; private home; normal48k+test-only native device registry; exact process inventory; no license duplication; symlink refusal; denied source write; allowed owned-run write; SIP-safe helper trampoline; read-only default-handler decisions; actual owned exit78 and conservative cleanup controls. No FL process launched.")
+    print("PASS UTF-16 template path boundary/non-BMP/refuse-before-copy; private home; normal48k+test-only native device registry; exact process inventory; independent installed/owned instances allowed; exact-copy duplicates preserved; no license duplication; symlink refusal; denied source write; allowed owned-run write; SIP-safe helper trampoline; read-only default-handler decisions; actual owned exit78 and conservative cleanup controls. No FL process launched.")
 }
 var args = Array(CommandLine.arguments.dropFirst())
 if args.isEmpty || args == ["--gui"] {

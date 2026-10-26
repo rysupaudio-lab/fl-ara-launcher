@@ -8,3 +8,4 @@
 - Preserve genuine ARA lifecycle, source ownership, cache invalidation and saved-state/teardown boundaries. Keep vendor-specific readiness handling scoped to its actual supported image.
 - Present the working project clearly. Keep demonstrated support and community reports distinguishable; do not invent compatibility percentages.
 - No third-party applications, plug-in/model binaries, licenses, private logs or user audio in commits. Intentional public synthetic demo assets are documented in docs/demo/README.md.
+- When publishing a new installer, update its download/version links in the shared hub: https://github.com/rysupaudio-lab/ara-launcher (local sibling ARA Launcher).

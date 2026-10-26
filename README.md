@@ -1,5 +1,7 @@
 # ARA 2 for FL Studio
 
+> **Logic + FL downloads:** [Choose your DAW →](https://github.com/rysupaudio-lab/ara-launcher)
+
 **Give ARA plug-ins direct access to your FL Studio audio clips.**
 
 FL ARA Launcher is a free, open-source Mac app that runs your licensed FL Studio in a private copy. Your installed FL and plug-ins stay intact.

@@ -664,6 +664,13 @@ final class Session {
 }
 func defaultCache() -> URL {
     if let path = ProcessInfo.processInfo.environment["RYSUP_FLARA_CACHE_ROOT"], path.hasPrefix("/") { return URL(fileURLWithPath: path) }
+    if let path = UserDefaults.standard.string(forKey: "privateCacheRoot"), path.hasPrefix("/") {
+        let url = URL(fileURLWithPath: path), parts = url.pathComponents
+        // A selected external disk must be mounted: never create a substitute
+        // directory under /Volumes when the owner's disk is disconnected.
+        if parts.count < 3 || parts[1] != "Volumes"
+            || (fm.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: []) ?? []).contains(where: { $0.path == "/Volumes/" + parts[2] }) { return url }
+    }
     return fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/FLARALauncher")
 }
 func bundledHelper() -> URL { Bundle.main.resourceURL!.appendingPathComponent("native/FLAppBridge.dylib") }
@@ -695,7 +702,7 @@ final class LauncherDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate 
             DispatchQueue.main.async { self.status.stringValue = message; self.busy = false; self.buttons.forEach { $0.isEnabled = true } }
         }
     }
-    @objc func check() { work { _ = try inspect(self.source); return "Reference verified: FL Studio 26.1.7.5421, exact hashes and original vendor signature. Runtime ARA qualification remains pending." } }
+    @objc func check() { work { _ = try inspect(self.source); return "Reference verified: FL Studio 26.1.7.5421, exact hashes and original vendor signature. See the qualification report for tested audio scope. Private copies: \(defaultCache().path)" } }
     @objc func cleanup() { work { try cleanupFinishedSession(defaultCache()) } }
     @objc func launchEmpty() { start(nil) }
     @objc func openProject() {
@@ -845,7 +852,7 @@ if args.isEmpty || args == ["--gui"] {
             default: guard !arg.hasPrefix("-"), project == nil else { throw fail("Unknown argument: \(arg)") }; project = canonical(URL(fileURLWithPath: arg))
             }
         }
-        if check { let data = try JSONSerialization.data(withJSONObject: inspect(source), options: [.prettyPrinted, .sortedKeys]); print(String(decoding: data, as: UTF8.self)) }
+        if check { var report = try inspect(source); report["private_cache_root"] = cache.path; let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]); print(String(decoding: data, as: UTF8.self)) }
         else if cleanup { print(try cleanupFinishedSession(cache.standardizedFileURL)) }
         else { try Session(cache: cache, helper: bundledHelper()).launch(source: source, project: project, testDevice: testDevice, headlessExport: headlessExport) }
     } catch { fputs("FL ARA Launcher: \(error.localizedDescription)\n", stderr); exit(1) }

@@ -17,6 +17,7 @@
 #include <ARA_API/ARAVST3.h>
 #import <AppKit/AppKit.h>
 #include <Security/Security.h>
+#include <CommonCrypto/CommonDigest.h>
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
@@ -80,6 +81,9 @@ struct BridgeRecord {
     // Storage changes only while this exact component admission is closed and
     // fully drained; every RT snapshot reader is inside that admission lease.
     std::unique_ptr<const NativeParameterEchoSnapshot> parameterEchoStorage;
+    std::string cacheParameterDiagnosticJSON; // Model-thread capture, never queried from process().
+    std::string generationReadinessDiagnosticJSON;
+    std::map<std::uintptr_t,std::array<float,5>> renewedAutochoirGenerations;
     std::atomic<const NativeParameterEchoSnapshot*> parameterEchoSnapshot{nullptr};
     std::atomic<std::uint64_t> nativeInputQueueExactEchoes{0};
     std::atomic<slot_power::Binding*> nativeSlotPower{nullptr};
@@ -156,6 +160,7 @@ struct Runtime {
     std::vector<std::unique_ptr<BridgeRecord>> records;
     std::atomic<bool> overlayFault{false},overlayStaleHoldQueued{false};bool nativeStopNoticeQueued=false;
     bool nativeBatchAfterPrimeReadOnly=false;
+    std::string nativeBatchPreparationPending;
     bool hooksInstalled=false,overlayInstalled=false,inTick=false,anyBoundary=false,observeNativeDSP=false,nativeReadyStatusPublished=false;
     std::string error;std::uint64_t ticks=0;
     BridgeRecord* byID(const std::string& id)const noexcept{
@@ -592,11 +597,128 @@ std::unique_ptr<const NativeParameterEchoSnapshot> captureCacheParameterEchoProo
     }catch(...){return {};}
     return proof;
 }
+void captureCacheParameterDiagnostic(BridgeRecord& r,const lab::StandaloneSourceCacheBatch& cache,const lab::Bytes& state){
+    demand(pthread_main_np()&&r.boundary,"parameter diagnostic requires the model boundary");
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];CC_SHA256(state.data(),static_cast<CC_LONG>(state.size()),digest);
+    static constexpr char hex[]="0123456789abcdef";char hash[65]{};
+    for(std::size_t i=0;i<sizeof(digest);++i){hash[i*2]=hex[digest[i]>>4];hash[i*2+1]=hex[digest[i]&15];}
+    NSMutableArray* native=[NSMutableArray array];NSMutableArray* owned=[NSMutableArray array];
+    auto* node=r.currentControllerNode.load();auto* controller=node?node->verifiedController.load():nullptr;
+    if(controller&&node->native&&node->controllerOwner.load()==&r
+        &&node->native->actualController.load()==controller&&node->native->nativeAlive&&!node->native->nativeTerminated){
+        const auto count=controller->getParameterCount();
+        if(count>=0&&count<=static_cast<int>(lab::OrdinaryParameterSnapshot::capacity))for(int i=0;i<count;++i){
+            Steinberg::Vst::ParameterInfo info{};if(controller->getParameterInfo(i,info)!=kResultOk)break;
+            const auto value=controller->getParamNormalized(info.id);if(!std::isfinite(value))break;
+            std::size_t length=0;while(length<128&&info.title[length])++length;
+            NSString* title=[[NSString alloc] initWithCharacters:reinterpret_cast<const unichar*>(info.title) length:length];
+            [native addObject:@{@"id":@(info.id),@"normalized":@(value),@"title":title?:@""}];
+        }
+    }
+    for(const auto& modification:cache.modifications){NSMutableArray* rows=[NSMutableArray array];const auto& values=modification.restoredOrdinaryParameters;
+        if(values.valid)for(std::uint32_t i=0;i<values.count&&i<values.capacity;++i)[rows addObject:@{@"id":@(values.rows[i].id),@"normalized":@(values.rows[i].normalized)}];
+        [owned addObject:@{@"modification":@(modification.modificationID.c_str()),@"readback_valid":@(values.valid),@"parameters":rows}];
+    }
+    NSData* json=[NSJSONSerialization dataWithJSONObject:@{@"ordinary_state_sha256":@(hash),@"native_parameters":native,@"owned_renderers":owned} options:0 error:nil];
+    r.cacheParameterDiagnosticJSON=json?std::string(static_cast<const char*>(json.bytes),json.length):std::string{};
+}
+template<class T>bool tryReadOwnedGenerationField(std::uintptr_t base,std::size_t offset,T& value){
+    if(!base||base>std::numeric_limits<std::uintptr_t>::max()-offset-sizeof(T))return false;
+    mach_vm_size_t copied=0;
+    return mach_vm_read_overwrite(mach_task_self(),base+offset,sizeof(T),reinterpret_cast<mach_vm_address_t>(&value),&copied)==KERN_SUCCESS&&copied==sizeof(T);
+}
+template<class T>T readOwnedGenerationField(std::uintptr_t base,std::size_t offset){
+    T value{};demand(tryReadOwnedGenerationField(base,offset,value),"owned generation field is unreadable");return value;
+}
+// Read-only ABI profile for the exact signed autochoir 1.0.0 VST3 executable
+// 390c549fa3b3e546d3ee4c9a7041dab0149e9f0944eddce403c0abce6783e43d.
+// Its renderer returns raw source while its asynchronous CachedStems is absent;
+// it advertises no analysis types and no usable public generation-ready flag.
+// No private vendor function, pointer, state, instruction or sample is changed.
+std::array<float,5> autochoirGenerationParameters(const lab::Bytes& state){
+    demand(state.size()>=8&&std::memcmp(state.data(),"VC2!",4)==0,"autochoir original JUCE state is unavailable");
+    std::uint32_t length=0;std::memcpy(&length,state.data()+4,4);
+    demand(length&&length<=state.size()-8&&length<=1024u*1024u,"autochoir JUCE XML extent is invalid");
+    NSData* xml=[NSData dataWithBytes:state.data()+8 length:length];NSString* text=[[NSString alloc] initWithData:xml encoding:NSUTF8StringEncoding];
+    demand(text&&[text rangeOfString:@"<!DOCTYPE" options:NSCaseInsensitiveSearch].location==NSNotFound
+        &&[text rangeOfString:@"<!ENTITY" options:NSCaseInsensitiveSearch].location==NSNotFound,"unsupported autochoir state XML");
+    NSXMLDocument* document=[[NSXMLDocument alloc] initWithData:xml options:NSXMLNodeLoadExternalEntitiesNever error:nil];
+    demand(document&&[document.rootElement.name isEqualToString:@"autochoir"],"autochoir original parameter XML could not be parsed");
+    const std::array<NSString*,5> keys={@"baseDetune",@"detuneDrift",@"detuneFrequency",@"formantShift",@"formantDrift"};
+    std::array<float,5> values{};std::array<bool,5> seen{};
+    for(NSXMLNode* node in document.rootElement.children){if(node.kind!=NSXMLElementKind)continue;NSXMLElement* element=(NSXMLElement*)node;
+        if(![element.name isEqualToString:@"PARAM"])continue;
+        NSString* key=[element attributeForName:@"id"].stringValue;
+        for(std::size_t i=0;i<keys.size();++i)if([key isEqualToString:keys[i]]){
+            demand(!seen[i],"duplicate autochoir generation parameter");NSString* value=[element attributeForName:@"value"].stringValue;
+            demand(value!=nil,"missing autochoir generation value");NSScanner* scanner=[NSScanner scannerWithString:value];
+            scanner.locale=[[NSLocale alloc] initWithLocaleIdentifier:@"en_US_POSIX"];float number=0;
+            demand([scanner scanFloat:&number]&&scanner.isAtEnd&&std::isfinite(number),"invalid autochoir generation value");values[i]=number;seen[i]=true;
+        }
+    }
+    for(bool present:seen)demand(present,"missing autochoir generation parameter");
+    demand(values[0]>=0&&values[0]<=0.05f&&values[1]>=0&&values[1]<=1&&values[2]>=0&&values[2]<=1
+        &&values[3]>=-1&&values[3]<=1&&values[4]>=0&&values[4]<=1,"unsupported autochoir generation parameter range");
+    // Actual binary uses one float FMADD, not a rounded multiply then subtract.
+    values[2]=std::fma(values[2],-0.9f,1.0f);return values;
+}
+void requireCurrentAutochoirGeneration(BridgeRecord& r,ARA::ARADocumentControllerRef document,ARA::ARAAudioSourceRef source,
+    const std::array<float,5>& expected,const std::function<void()>& renewSamples){
+    demand(pthread_main_np()&&r.boundary&&r.identity.pluginModuleSHA256=="390c549fa3b3e546d3ee4c9a7041dab0149e9f0944eddce403c0abce6783e43d",
+        "generation observation requires the exact owned autochoir model boundary");
+    const auto address=reinterpret_cast<std::uintptr_t>(source);const auto dc=reinterpret_cast<std::uintptr_t>(document);
+    const auto state=readOwnedGenerationField<std::uint32_t>(address,0xd0);
+    demand(state<=7,"autochoir generation status is outside the pinned ABI profile");
+    const auto stems=readOwnedGenerationField<std::uintptr_t>(address,0xc0);
+    const auto specialisation=readOwnedGenerationField<std::uintptr_t>(dc,0x138);
+    if(!specialisation)throw lab::SourceCacheNotReady("autochoir document coordinator is pending");
+    const auto desired=readOwnedGenerationField<std::array<float,5>>(specialisation,0x4f0);
+    std::array<float,5> actual{};double rate=0;std::int32_t channels=0,frames=0;std::int64_t length=0;std::uintptr_t buffers=0;
+    bool readable=false;
+    if(stems&&state==5){
+        readable=tryReadOwnedGenerationField(stems,0x140,actual)&&tryReadOwnedGenerationField(stems,0x128,rate)
+            &&tryReadOwnedGenerationField(stems,0,channels)&&tryReadOwnedGenerationField(stems,4,frames)
+            &&tryReadOwnedGenerationField(stems,0x130,length)&&tryReadOwnedGenerationField(stems,0x10,buffers);
+        readable=readable&&channels>0&&channels<=7&&frames>0&&frames<=48000*600&&length>0&&length<=48000*600;
+        for(std::int32_t channel=0;channel<channels&&readable;++channel){std::uintptr_t plane=0;float sample=0;
+            readable=tryReadOwnedGenerationField(buffers,static_cast<std::size_t>(channel)*sizeof(plane),plane)
+                &&tryReadOwnedGenerationField(plane,0,sample)&&tryReadOwnedGenerationField(plane,static_cast<std::size_t>(frames-1)*sizeof(float),sample);
+        }
+    }
+    std::atomic_thread_fence(std::memory_order_acquire);
+    const bool stable=readOwnedGenerationField<std::uint32_t>(address,0xd0)==state
+        &&readOwnedGenerationField<std::uintptr_t>(address,0xc0)==stems;
+    bool current=stable&&readable&&state==5&&stems&&rate==48000&&buffers;
+    for(std::size_t i=0;i<expected.size();++i)current=current&&std::isfinite(actual[i])&&actual[i]==expected[i]&&desired[i]==expected[i];
+    NSMutableArray* wanted=[NSMutableArray array];NSMutableArray* observed=[NSMutableArray array];NSMutableArray* requested=[NSMutableArray array];
+    for(std::size_t i=0;i<expected.size();++i){[wanted addObject:@(expected[i])];[observed addObject:@(actual[i])];[requested addObject:@(desired[i])];}
+    NSData* json=[NSJSONSerialization dataWithJSONObject:@{@"source":@(address),@"document":@(dc),@"status":@(state),@"stable":@(stable),
+        @"sample_rate":@(rate),@"channels":@(channels),@"frames":@(frames),@"length":@(length),@"readable":@(readable),
+        @"expected_generation_parameters":wanted,@"requested_generation_parameters":requested,@"observed_generation_parameters":observed,@"current":@(current)} options:0 error:nil];
+    r.generationReadinessDiagnosticJSON=json?std::string(static_cast<const char*>(json.bytes),json.length):std::string{};
+    if(!stable)throw lab::SourceCacheNotReady("autochoir generation changed during observation");
+    if(stems&&state==5&&!readable)throw lab::SourceCacheNotReady("autochoir cached stems changed or were unreadable during observation");
+    demand(state!=6&&state!=7,state==6?"autochoir engine/models are unavailable":"autochoir source generation failed");
+    bool requestIsCurrent=true;for(std::size_t i=0;i<expected.size();++i)requestIsCurrent=requestIsCurrent&&desired[i]==expected[i];
+    if(!current&&state==5&&readable&&requestIsCurrent&&renewSamples){
+        const auto old=r.renewedAutochoirGenerations.find(address);
+        if(old==r.renewedAutochoirGenerations.end()||old->second!=expected){
+            r.renewedAutochoirGenerations[address]=expected;
+            // Initial sample enable can snapshot defaults before native state
+            // restoration, and a debounced StageB request can precede initial
+            // stems. Re-enable this same source through PUBLIC ARA lifecycle
+            // once, now that its actual requested parameters are current.
+            renewSamples();writeNativeApplicationEvent("actual_autochoir_source_access_renewed_for_current_settings",r.identity.instanceID);
+        }
+    }
+    if(!current)throw lab::SourceCacheNotReady("autochoir is preparing generated stems for the current settings");
+}
 void refreshAtBoundary(BridgeRecord& r,bool build,bool typedPendingOnly=false){
     auto& rt=runtime();publishAllControllerAssociationsOnMain();auto snapshot=rt.coordinator->captureActualCurrentSnapshot(r.identity.instanceID);
     auto* power=r.nativeSlotPower.load();demand(nativeSlotPowerObserverReady()&&power&&r.nativeSlotPowerRegistered&&!power->closed(),"native slot-power binding is unavailable at model boundary");
     rt.overlay->associateNativeSlotPowerAtNativeBoundary(r.identity.instanceID,r.identity.actualComponent,*power);
     const auto currentModel=snapshot.data().model.nativeRecordModelSHA256+":"+snapshot.data().model.sourcePCMModelSHA256+":"+std::to_string(snapshot.data().model.clock.ppq)+":"+std::to_string(snapshot.data().model.clock.tempoMilliBPM);
+    if(r.pendingArchive||r.pendingPlainLoad||!r.graphApplied||r.appliedModel!=currentModel)r.renewedAutochoirGenerations.clear();
     if(r.pendingArchive){
         // Pure current-RAM preflight precedes any potentially failing ARA action.
         try{rt.adapter->validateActualCurrentRAMForArchive(*r.pendingArchive,r.identity);}
@@ -634,6 +756,14 @@ void refreshAtBoundary(BridgeRecord& r,bool build,bool typedPendingOnly=false){
         const auto result=hooks::captureOriginalComponentState(*r.native,*ordinary);
         options.ordinaryCompanionStateBeforeActivation=ordinary->bytes();ordinary->release();
         demand(result==kResultOk,"actual native original-only component parameter state capture failed");
+        if(r.identity.pluginModuleSHA256=="390c549fa3b3e546d3ee4c9a7041dab0149e9f0944eddce403c0abce6783e43d"){
+            auto* node=r.currentControllerNode.load();auto* controller=node?node->verifiedController.load():nullptr;
+            demand(controller&&node->native&&node->controllerOwner.load()==&r&&node->native->actualController.load()==controller,
+                "autochoir current controller association is unavailable");
+            const auto bypass=controller->getParamNormalized(1652125811u);demand(std::isfinite(bypass)&&bypass>=0&&bypass<=1,"autochoir bypass readback is invalid");
+            if(bypass<0.5){const auto expected=autochoirGenerationParameters(options.ordinaryCompanionStateBeforeActivation);
+                options.requireCurrentGeneration=[&r,expected](ARA::ARADocumentControllerRef dc,ARA::ARAAudioSourceRef source,const std::function<void()>& renew){requireCurrentAutochoirGeneration(r,dc,source,expected,renew);};}
+        }
         observeAndRequireNativeMixBoundary(r);
         auto cache=rt.coordinator->rebuildWholeSourceCaches(r.identity.instanceID,snapshot,options);
         // A background native source load must not publish an obsolete PCM
@@ -652,6 +782,7 @@ void refreshAtBoundary(BridgeRecord& r,bool build,bool typedPendingOnly=false){
         demand(r.decoded.has_value()&&r.copied,"source overlay requires exact current decoded model");
         if(!r.nativeSlotPowerSourcePublished&&power->snapshotForBlock()==slot_power::Power::Unknown){r.dirty=true;throw lab::NativeModelBoundaryUnavailable("initial native slot power is unknown; source publication deferred");}
         auto parameterProof=captureCacheParameterEchoProof(r,cache);
+        captureCacheParameterDiagnostic(r,cache,options.ordinaryCompanionStateBeforeActivation);
         rt.overlay->publish(r.identity.instanceID,*r.decoded,r.copied,std::move(cache));r.nativeSlotPowerSourcePublished=true;
         r.parameterEchoSnapshot.store(nullptr,std::memory_order_release);r.parameterEchoStorage=std::move(parameterProof);
         r.parameterEchoSnapshot.store(r.parameterEchoStorage.get(),std::memory_order_release);
@@ -1104,6 +1235,14 @@ bool status(){
         d[@"scoped_handler_parameter_notifications"]=@(r->nativeHandlerParameterNotifications.load());
         d[@"scoped_input_queue_parameter_notifications"]=@(r->nativeInputQueueParameterNotifications.load());
         d[@"scoped_input_queue_exact_current_cache_echoes"]=@(r->nativeInputQueueExactEchoes.load());d[@"current_cache_parameter_echo_proof_available"]=@(r->parameterEchoSnapshot.load()!=nullptr);
+        if(!r->cacheParameterDiagnosticJSON.empty()){
+            NSData* json=[NSData dataWithBytes:r->cacheParameterDiagnosticJSON.data() length:r->cacheParameterDiagnosticJSON.size()];
+            d[@"cache_parameter_diagnostic"]=[NSJSONSerialization JSONObjectWithData:json options:0 error:nil]?:@{};
+        }
+        if(!r->generationReadinessDiagnosticJSON.empty()){
+            NSData* json=[NSData dataWithBytes:r->generationReadinessDiagnosticJSON.data() length:r->generationReadinessDiagnosticJSON.size()];
+            d[@"generation_readiness"]=[NSJSONSerialization JSONObjectWithData:json options:0 error:nil]?:@{};
+        }
         d[@"initial_wait_notice_shown"]=@(r->initialWaitNoticeShown);
         d[@"native_stop_for_cache_rebuild_pending"]=@(r->nativeStopForRebuildPending.load());d[@"native_stop_requested_epoch"]=@(r->nativeStopRequestedEpoch.load());d[@"actual_native_stops_verified"]=@(r->actualNativeStopsVerified);
         d[@"instance_id"]=@(r->identity.instanceID.c_str());d[@"native_insert"]=@(r->insert.mixerInsert);d[@"bound"]=@YES;
@@ -1241,6 +1380,7 @@ bool status(){
     const auto sourceGlobalCounters=rt.overlay?rt.overlay->counters():lab::FLStandaloneOverlayCounters{};
     data[@"source_overlay_global_counters"]=@{@"qualified_preview_unrelated_callbacks":@(sourceGlobalCounters.qualifiedPreviewUnrelatedCallbacks)};
     data[@"native_batch_after_prime_observation_only"]=@(rt.nativeBatchAfterPrimeReadOnly);
+    data[@"native_batch_preparation_pending"]=@(rt.nativeBatchPreparationPending.c_str());
     data[@"source_overlay_installed"]=@(rt.overlayInstalled);data[@"inserts"]=inserts;data[@"error"]=@(rt.error.c_str());
     NSMutableArray* ownWindows=[NSMutableArray array];
     for(NSWindow* window in NSApp.windows){NSMutableDictionary* item=[NSMutableDictionary dictionary];
@@ -1313,14 +1453,15 @@ void drainNativeSlotPowerStop(BridgeRecord& r){
 bool primeAllCurrentARAForNativeBatch(void*)noexcept{
     auto& rt=runtime();
     const auto refuse=[&](const std::string& message)noexcept{
-        try{rt.nativeBatchAfterPrimeReadOnly=false;rt.error="Native CLI ARA preparation refused: "+message;status();
+        try{rt.nativeBatchAfterPrimeReadOnly=false;rt.nativeBatchPreparationPending.clear();rt.error="Native CLI ARA preparation refused: "+message;status();
             writeNativeApplicationEvent("native_cli_ara_prime_failed",rt.error);}catch(...){}return false;
     };
     if(!pthread_main_np()||!nativeApplicationAdmitted())return refuse("owned main-thread admission unavailable");
     if(rt.inTick||currentNativeSaveTransaction()||rt.nativeSaveFreeze)return refuse("model or native Save operation already active");
     rt.nativeBatchAfterPrimeReadOnly=false;
     rt.inTick=true;struct Reset{bool& value;~Reset(){value=false;}}reset{rt.inTick};
-    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(30);
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(300);
+    auto nextPendingStatus=std::chrono::steady_clock::now();
     std::string pending="current native source preparation is pending";
     try{for(;;){
         if(std::chrono::steady_clock::now()>=deadline)return refuse("timed out waiting for "+pending);
@@ -1358,9 +1499,10 @@ bool primeAllCurrentARAForNativeBatch(void*)noexcept{
             // Its nested timers observe only; they must not re-associate an
             // unchanged source table while global native source readers run.
             rt.nativeBatchAfterPrimeReadOnly=true;
-            rt.error.clear();status();writeNativeApplicationEvent("native_cli_ara_prime_ready");return true;
+            rt.error.clear();rt.nativeBatchPreparationPending.clear();status();writeNativeApplicationEvent("native_cli_ara_prime_ready");return true;
         }catch(const lab::NativeModelBoundaryUnavailable& e){pending=e.what();}
         catch(const lab::SourceCacheNotReady& e){pending=e.what();}
+        if(std::chrono::steady_clock::now()>=nextPendingStatus){rt.nativeBatchPreparationPending=pending;status();nextPendingStatus=std::chrono::steady_clock::now()+std::chrono::seconds(1);}
         // Existing SDK analysis/loader completions need the actual main queue.
         // All per-insert Boundary objects are gone before pumping; rt.inTick
         // prevents this bridge's timer from reentering model work.
@@ -1488,7 +1630,8 @@ void tick(const NativeApplication& app,void*)noexcept{
         for(auto& node:rt.records){auto& r=*node;if(r.alive&&!r.teardown&&!r.disabled&&r.initialPrimePending&&r.native->blockedProcessCallbacks.load()>0&&!r.initialWaitNoticeShown){
             r.initialWaitNoticeShown=true;if(initialWaitReason.empty())initialWaitReason=r.error.empty()?"Source audio preparation is still pending for this insert.":r.error;
         }}
-        if(!initialWaitReason.empty()){
+        const char* batchExport=std::getenv("RYSUP_FLARA_BATCH_EXPORT");
+        if(!initialWaitReason.empty()&&!(batchExport&&std::strcmp(batchExport,"1")==0)){
             NSAlert* alert=[NSAlert new];alert.messageText=@"ARA is still preparing an insert";
             alert.informativeText=@((std::string("Playback for this insert is held until its source audio is ready. Stop playback to let preparation finish. ")+initialWaitReason).c_str());
             [alert addButtonWithTitle:@"Keep session open"];status();if(NSApp.keyWindow)[alert beginSheetModalForWindow:NSApp.keyWindow completionHandler:nil];else [alert runModal];

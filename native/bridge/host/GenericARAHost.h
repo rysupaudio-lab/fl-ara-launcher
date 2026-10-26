@@ -14,7 +14,7 @@
 
 namespace rysup::ara_lab {
 using Bytes = std::vector<ARA::ARAByte>;
-// Only actual unfinished SDK analysis or a safely closed model-revision race.
+// Actual unfinished analysis/generation, or a safely closed model-revision race.
 // Caller keeps the source gate closed and polls/rebuilds at its next real hold.
 // Contract, unsupported format/timing and uncertain lifecycle failures are not
 // retryable by this type.
@@ -146,6 +146,12 @@ struct WholeSourceCacheOptions {
     // owner outside ARA/model calls. Never a bridge envelope or ARA archive.
     Bytes ordinaryCompanionStateBeforeActivation;
     bool applyOrdinaryCompanionStateBeforeActivation = false;
+    // Optional exact-plugin asynchronous-generation adapter. Checks the actual
+    // owned document/source before and after rendering; pending work must throw
+    // SourceCacheNotReady, never authorize a dry or stale cache.
+    // The optional third argument renews public sample access before any owned
+    // renderer exists. It is empty during the post-render validation.
+    std::function<void(ARA::ARADocumentControllerRef,ARA::ARAAudioSourceRef,const std::function<void()>&)> requireCurrentGeneration;
 };
 struct WholeModificationSourceCache {
     struct ContentReadiness {ARA::ARAContentType type;bool actualContentAvailable=false;};

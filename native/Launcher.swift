@@ -7,7 +7,7 @@ import Darwin
 import CoreServices
 import UniformTypeIdentifiers
 
-let launcherVersion = "0.1.0-candidate.13"
+let launcherVersion = "0.1.0-candidate.14"
 let enginePath = "Contents/Libs/FLEngine_x64.dylib"
 let executablePath = "Contents/MacOS/OsxFL"
 let engineHash = "8d23eebf0fc63fdd1957ba2c8d0f1f1d4e053a9f43173d3c22606c47ace7b76d"
@@ -120,12 +120,11 @@ func batchAudioDeviceNames() throws -> (input: String, output: String) {
         guard let uid = string(device, kAudioDevicePropertyDeviceUID),
               ["BuiltInMicrophoneDevice", "BuiltInSpeakerDevice", "BuiltInOutputDevice"].contains(uid),
               let name = string(device, kAudioObjectPropertyName) else { continue }
-        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyNominalSampleRate, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-        var rate: Float64 = 0; var size = UInt32(MemoryLayout<Float64>.size)
-        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &rate) == noErr, rate == 48000 else { continue }
+        // Offline exports use the sealed rate-hold companion and an explicit
+        // 48 kHz engine rate. The hardware rate need not match and is never set.
         if uid == "BuiltInMicrophoneDevice" { input = name } else { output = name }
     }
-    guard let input, let output else { throw fail("The internal headless profile needs built-in input/output already running at 48 kHz. No device or system setting was changed.") }
+    guard let input, let output else { throw fail("The internal headless profile needs built-in input/output devices. No device or system setting was changed.") }
     return (input, output)
 }
 func verifyNativeBatchOutput(run: URL, runID: String, pid: Int32) throws -> [String: Any] {

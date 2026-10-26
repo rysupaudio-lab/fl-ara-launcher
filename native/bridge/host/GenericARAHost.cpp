@@ -695,6 +695,10 @@ WholeModificationSourceCache HostController::renderWholeModificationSourceCache(
     if(p->assignedRoles & ARA::kARAEditorViewRole)
         demand(p->extension->editorViewInterface->structSize>=ARA::kARAEditorViewInterfaceMinSize
             && p->extension->editorViewInterface->notifyHideRegionSequences,"editor view cannot hide internal cache sequence");
+    if(options.requireCurrentGeneration)options.requireCurrentGeneration(p->dc->getRef(),source.ara,[&]{
+        p->dc->enableAudioSourceSamplesAccess(source.ara,false);
+        p->dc->enableAudioSourceSamplesAccess(source.ara,true);
+    });
     OperationGuard operation(p->sourceCacheOperation);
     auto auxiliary=std::make_unique<Impl::CacheAuxiliary>();auxiliary->companion=std::move(own);
     p->auxiliaries.push_back(std::move(auxiliary));auto& aux=*p->auxiliaries.back();
@@ -757,6 +761,7 @@ WholeModificationSourceCache HostController::renderWholeModificationSourceCache(
         if(spec.channelCount==1 && renderChannels==2){
             demand(std::memcmp(rendered[0].data(),rendered[1].data(),rendered[0].size()*sizeof(float))==0,
                    "mono source produced different L/R samples; refuse collapse/downmix");rendered.resize(1);}
+        if(options.requireCurrentGeneration)options.requireCurrentGeneration(p->dc->getRef(),source.ara,{});
         cache.channels=std::move(rendered);
         p->removeCacheAuxiliary(aux);auxiliaryRegistered=false;p->auxiliaries.pop_back();
         p->dc->notifyModelUpdates();cache.editNotificationSerial=p->editNotificationSerial.load();cache.internalRegionRemoved=true;

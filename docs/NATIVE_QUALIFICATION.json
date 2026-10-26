@@ -170,5 +170,6 @@
     "Other plugins and autochoir executable builds need their own evidence; the exact-image readiness adapter is not applied to unknown binaries",
     "Patched projects must be reopened/saved through this launcher; unpatched FL may discard extended state",
     "No independent processed-audio parity or broad DAW/OS/plugin-version matrix is claimed"
-  ]
+  ],
+  "launcher_source_revision": "7623507ada3915fa4e1e45f1e73130c0a328c38a"
 }

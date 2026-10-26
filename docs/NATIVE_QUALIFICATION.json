@@ -80,7 +80,17 @@
       "not_proven": [
         "audible Formant DSP change against an independent ARA-processed reference",
         "every editor operation or parameter automation"
-      ]
+      ],
+      "latest_parameter_ab": {
+        "baseline_detune": 0.03,
+        "changed_detune": 0.05,
+        "installed_candidate13_app": true,
+        "changed_sample_values": 0,
+        "max_absolute_difference": 0.0,
+        "rms_difference": 0.0,
+        "both_wav_sha256": "bb4dbd79580ddfd86e097e6be1eaaca7e09f1670d0d199c4a040cda2ec998047",
+        "interpretation": "This parameter change did not alter the render. Working audible ARA edits are not established; the cause is unresolved."
+      }
     },
     {
       "name": "Melodyne",
@@ -124,5 +134,6 @@
     "Patched projects must be reopened/saved through this launcher; unpatched FL may discard extended state",
     "Internal batch return hook qualifies ordinary raw-LR arm64 loader returns, not arbitrary C++ unwinding",
     "Stock control is not an ARA-processed audio reference; DSP/editor parity is not established"
-  ]
+  ],
+  "audible_editing_status": "unfinished: latest tested Detune parameter A/B produced no audio change"
 }

@@ -1,0 +1,21 @@
+name: Another DAW / host proposal
+description: Request a host or propose an adapter contribution.
+title: "[Host] "
+body:
+  - type: input
+    id: host
+    attributes:
+      label: DAW, version and operating system
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: What would you like to do with ARA?
+    validations:
+      required: true
+  - type: textarea
+    id: contribution
+    attributes:
+      label: Interested in contributing?
+      description: "Optional: share useful SDK/API/headless export information or the adapter work you want to take on."

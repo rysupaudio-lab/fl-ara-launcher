@@ -1,0 +1,37 @@
+name: Plug-in compatibility
+description: Share what worked or what broke. No formal test suite needed.
+title: "[Plugin] "
+body:
+  - type: input
+    id: plugin
+    attributes:
+      label: Plug-in and version
+      placeholder: "Name, version, and AU/VST3 format"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: DAW, OS and launcher version
+      placeholder: "FL build, macOS version, Apple Silicon/Intel, launcher release"
+    validations:
+      required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: How did it go?
+      options:
+        - Edits changed the audio as expected
+        - Loaded, but edits did not change the audio
+        - Could not load or start
+        - Saved edits were missing on reopen
+        - Crash or another problem
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: What did you try?
+      description: "Name the edit/operation and describe the result. A short log excerpt can help; remove private paths, license data and user audio."
+    validations:
+      required: true

@@ -1,6 +1,6 @@
 # Standalone native ARA host integration
 
-Public implementation contract. Exact normal-app and third-party runtime qualification is pending; no release claim is made. Private laboratory reports and historical test totals are not part of this source distribution.
+Public implementation contract for the shared host layer. Current FL release evidence and scope are recorded in [NATIVE_QUALIFICATION.json](../../../docs/NATIVE_QUALIFICATION.json). See [PORTING.md](../../../docs/PORTING.md) for adapting the host to another DAW. Private laboratory reports are not part of this source distribution.
 
 
 This is the new normal-application source line. The historical FL AU laboratory

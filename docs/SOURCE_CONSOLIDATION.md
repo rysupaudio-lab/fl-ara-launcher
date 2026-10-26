@@ -1,9 +1,8 @@
-# Source consolidation after integration freeze
+# Source layout and consolidation
 
-The integration owner must freeze the normal-app helper before consolidation.
-No helper files have been copied out of the ongoing mutable research tree.
+The active helper source is consolidated in this repository. Build from `native/bridge`; the staging tool below documents the original import process and is not a routine development step.
 
-The durable layout will be `native/bridge/host`, `native/bridge/native`, and
+The durable layout is `native/bridge/host`, `native/bridge/native`, and
 `native/bridge/legacy/FLNativeModel.{h,cpp}`. Only directly enumerated C++/ObjC++
 source/header files and the helper builder are eligible. Build outputs, binaries,
 SDK trees, projects, audio, credentials and registry files are excluded.

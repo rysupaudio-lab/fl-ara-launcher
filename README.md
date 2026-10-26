@@ -1,50 +1,60 @@
-# FL ARA Launcher
+# ARA 2 for FL Studio
 
-An experimental ARA 2 integration for **FL Studio 2026 26.1.7.5421 on Apple Silicon Macs**. It runs your licensed FL Studio in a private application copy and keeps your installed FL application unchanged.
+**Give ARA plug-ins direct access to your FL Studio audio clips.**
 
-**[Download the Mac installer (DMG)](https://github.com/rysupaudio-lab/fl-ara-launcher/releases/download/v0.1.0-candidate.14/FL-ARA-Launcher-0.1.0-candidate.14-arm64.dmg)** · [Release notes and checksums](https://github.com/rysupaudio-lab/fl-ara-launcher/releases/tag/v0.1.0-candidate.14)
+FL ARA Launcher is a free, open-source Mac app that runs your licensed FL Studio in a private copy. Your installed FL and plug-ins stay intact.
 
-## Install
+**[Download for Mac →](https://github.com/rysupaudio-lab/fl-ara-launcher/releases/download/v0.1.0-candidate.14/FL-ARA-Launcher-0.1.0-candidate.14-arm64.dmg)** · [Release notes](https://github.com/rysupaudio-lab/fl-ara-launcher/releases/tag/v0.1.0-candidate.14) · [Report a plug-in](https://github.com/rysupaudio-lab/fl-ara-launcher/issues/new?template=plugin-compatibility.yml)
 
-1. Download the **arm64 DMG** from this repository’s Releases page.
-2. Open it and drag **FL ARA Launcher** to **Applications**.
-3. Open **FL ARA Launcher** and choose **Open a backed-up project…**.
-4. Choose your licensed FL Studio application if prompted. Work in the private FL window and keep the launcher open.
-5. Save your project, then quit that FL window normally when finished.
+**Public beta · Signed and notarized · MIT license**
 
-No Terminal commands, Python or developer tools are needed. Your ARA plugins must be installed and licensed separately. No Image-Line application files, plugin binaries or license keys are included.
+Current installer: **Apple Silicon · FL Studio 26.1.7.5421 · macOS 15.4+**
 
-**Projects containing this integration’s ARA edits must be reopened and saved through FL ARA Launcher.** Ordinary unpatched FL does not understand its extended component state and may discard ARA edits or plugin settings when saving. Keep an untouched project backup.
+## Get started
 
-## Compatibility
+1. Download and open the DMG. Put **FL ARA Launcher** in Applications.
+2. Open it and choose **Open a backed-up project…**. Select your licensed FL application if prompted.
+3. Work in the private FL window. Keep the launcher open, save normally, and quit that FL window when finished.
 
-| Requirement | Current scope |
+No Terminal, Python, developer tools or Rys Up account is required. Install and license your ARA plug-ins separately.
+
+Start with **48 kHz, 16-bit mono/stereo audio** and place **one ARA effect first in its mixer insert**. Preparation happens while stopped; after an edit finishes preparing, restart playback if it was stopped.
+
+**Reopen and save projects containing these ARA edits through FL ARA Launcher.** Keep an untouched backup: ordinary FL does not understand the extended ARA state and can discard it on save.
+
+## Hear an actual edit
+
+Autochoir 1.0.0 VST3 processed audio inside normal FL Studio. Its gain edit changed the exported level by about **10 dB**. Its Detune edit changed **360,000 sample values**, with a substantial audio difference.
+
+**[Listen before the Detune edit](https://github.com/rysupaudio-lab/fl-ara-launcher/blob/main/docs/demo/detune-before.mp3)** · **[Listen after](https://github.com/rysupaudio-lab/fl-ara-launcher/blob/main/docs/demo/detune-after.mp3)**
+
+These short examples use a **synthetic test clip**. They are compressed copies of actual native FL exports, with the same output gain and no normalization. [Audio provenance](docs/demo/README.md) · [Full results](docs/NATIVE_QUALIFICATION.json)
+
+## Bring your ARA plug-in
+
+The project contains a shared ARA host layer and a native FL integration. Wider plug-in compatibility is a central goal, and community reports help decide what to improve next.
+
+| Plug-in | Current evidence |
 |---|---|
-| Mac | Apple Silicon / arm64 |
-| FL Studio | Original Image-Line-signed **26.1.7.5421**; other builds are refused |
-| macOS | App deployment minimum **15.4**; native evidence so far is from **macOS 27.0 (26A428)** |
-| Audio | **48 kHz**, resident PCM16 mono/stereo source audio |
-| Insert placement | One ARA effect per mixer insert, first in the effect chain |
-| Source processing | No source stretching or source-rate conversion; no plugin latency or tail in this initial route |
-| Plugin evidence | Real autochoir 1.0.0 VST3 integration work; compatibility is plugin-specific |
+| autochoir 1.0.0 VST3 | Processed audio, audible gain/Detune edits and saved-state exports demonstrated |
+| Melodyne 5.4.2 VST3 | Loading, default export and saving observed; edited audio and cold recall still need confirmation |
+| Other ARA VST3 plug-ins | Try your plug-in and [share what worked or broke](https://github.com/rysupaudio-lab/fl-ara-launcher/issues/new?template=plugin-compatibility.yml) |
 
-Candidate **0.1.0-candidate.14** fixes processed-audio preparation. The launcher waits for autochoir's completed generation to match its current settings before publishing source caches. It uses public ARA sample-access lifecycle calls to renew an initial generation that captured default settings. Installed plugin files are unchanged.
+We publish the working integration now and expand compatibility in the open. The current evidence does not establish a percentage of all ARA plug-ins supported. See [compatibility details](docs/COMPATIBILITY.md) for the exact host, audio and plug-in scope.
 
-**Audible edits are verified with autochoir 1.0.0 VST3 in native FL exports.** Changing Output Gain from −10 to −20 dB reduced the measured level by about 10 dB. Changing Detune from .03 to .05 changed 360000 output sample values, with an RMS difference of 0.104. Each export covered all six full/cropped/repeated mono/stereo clips, Float32 stereo at 48 kHz, 276000 frames, and exited normally. See [the qualification report](docs/NATIVE_QUALIFICATION.json).
+## Want ARA in another DAW?
 
-This remains an experimental, exact-profile integration. The autochoir readiness adapter is pinned to executable SHA256 `390c549fa3b3e546d3ee4c9a7041dab0149e9f0944eddce403c0abce6783e43d`. Other plugin builds, every editor gesture and automation operation are not qualified by these checks. Melodyne 5.4.2 previously bound, rendered a default project and saved; its editing and cold recall remain unqualified. No universal ARA conformance or compatibility with every plugin, DAW version or Mac is claimed.
+**Logic Pro:** [Logic ARA Launcher](https://github.com/rysupaudio-lab/logic-ara-launcher) has its own download and requirements.
 
-Source caches prepare while playback is stopped. An ARA edit during playback can stop playback for preparation; restart playback explicitly after preparation completes.
+**Developers:** use [the porting guide](docs/PORTING.md) to find the shared ARA host, source readers, state handling and native integration boundaries. Each DAW needs its own adapter. Contributions that add another host or improve plug-in compatibility are welcome.
 
-## Your installed FL stays intact
+[Contribute](CONTRIBUTING.md) · [Request a DAW](https://github.com/rysupaudio-lab/fl-ara-launcher/issues/new?template=host-request.yml)
 
-The launcher verifies the original Image-Line signature and exact application hashes, creates its own temporary app/home/preferences, and denies writes to the installed DAW, installed plugins and normal FL preferences/user-data directories. Legitimate authorization is read without copying license data.
+## Your original install stays intact
 
-Other installed DAW sessions are left alone. A failed or interrupted launcher preserves its private session so you can save your work. After that private FL process exits normally, **Clean finished session** removes its finished copy. Diagnostics stay under `~/Library/Caches/FLARALauncher/runs`.
+The launcher checks your original FL signature/build, creates a private app and preferences, and protects installed DAW/plug-in files and normal FL data from writes. It reads legitimate authorization without distributing license data. Other installed DAW sessions are left alone.
 
-The private copy normally uses a same-volume APFS clone. If FL is on another volume, the launcher currently supports a full-copy fallback only on an explicitly selected mounted **Razer SSD**, after checking space. It has no automatic internal-disk full-copy fallback. Very long cache paths are refused because this FL build truncates native template paths; use the default cache or a short real path.
-
-To uninstall, drag only **FL ARA Launcher.app** to Trash after its private sessions have exited. Your installed FL Studio remains in place.
+If a session is interrupted, its private copy is preserved so you can save your work. After it exits, **Clean finished session** removes the finished copy. To uninstall, quit the private session and remove only **FL ARA Launcher.app**.
 
 ## Build from source
 

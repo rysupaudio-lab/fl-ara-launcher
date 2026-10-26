@@ -2,7 +2,7 @@
 
 An experimental ARA 2 integration for **FL Studio 2026 26.1.7.5421 on Apple Silicon Macs**. It runs your licensed FL Studio in a private application copy and keeps your installed FL application unchanged.
 
-**[Download the Mac installer (DMG)](https://github.com/rysupaudio-lab/fl-ara-launcher/releases/download/v0.1.0-candidate.13/FL-ARA-Launcher-0.1.0-candidate.13-arm64.dmg)** · [Release notes and checksums](https://github.com/rysupaudio-lab/fl-ara-launcher/releases/tag/v0.1.0-candidate.13)
+**[Download the Mac installer (DMG)](https://github.com/rysupaudio-lab/fl-ara-launcher/releases/download/v0.1.0-candidate.14/FL-ARA-Launcher-0.1.0-candidate.14-arm64.dmg)** · [Release notes and checksums](https://github.com/rysupaudio-lab/fl-ara-launcher/releases/tag/v0.1.0-candidate.14)
 
 ## Install
 
@@ -28,9 +28,11 @@ No Terminal commands, Python or developer tools are needed. Your ARA plugins mus
 | Source processing | No source stretching or source-rate conversion; no plugin latency or tail in this initial route |
 | Plugin evidence | Real autochoir 1.0.0 VST3 integration work; compatibility is plugin-specific |
 
-Candidate **0.1.0-candidate.13** includes native project saving and the genuine FL batch-render path with ARA preparation after project loading. Native saves retain both ordinary plugin state and genuine ARA archives; paired autochoir Formant values of +5 were saved. Three independent cold headless runs have played all six full/cropped/repeated mono/stereo clips, produced identical Float32 stereo 48 kHz audio (276000 frames), and exited normally with no private FL processes left running.
+Candidate **0.1.0-candidate.14** fixes processed-audio preparation. The launcher waits for autochoir's completed generation to match its current settings before publishing source caches. It uses public ARA sample-access lifecycle calls to renew an initial generation that captured default settings. Installed plugin files are unchanged.
 
-**Audible editing is not working in the latest tested parameter A/B.** Using the installed candidate13 app, changing both autochoir Detune values from .03 to .05 produced exactly identical audio: zero changed samples. Genuine ARA binding/source playback and saved state do not establish working audible edits. Treat this as an unfinished research integration, not a working audio-editing patch. The unpatched control is a rendering reference, not a processed ARA reference; an audible Formant DSP change also remains unproven. Melodyne 5.4.2 previously bound, rendered its default six-clip project and saved on quit; its editing and cold recall are unqualified. This is an experimental integration, not general ARA conformance or compatibility with every plugin, DAW version or Mac.
+**Audible edits are verified with autochoir 1.0.0 VST3 in native FL exports.** Changing Output Gain from −10 to −20 dB reduced the measured level by about 10 dB. Changing Detune from .03 to .05 changed 360000 output sample values, with an RMS difference of 0.104. Each export covered all six full/cropped/repeated mono/stereo clips, Float32 stereo at 48 kHz, 276000 frames, and exited normally. See [the qualification report](docs/NATIVE_QUALIFICATION.json).
+
+This remains an experimental, exact-profile integration. The autochoir readiness adapter is pinned to executable SHA256 `390c549fa3b3e546d3ee4c9a7041dab0149e9f0944eddce403c0abce6783e43d`. Other plugin builds, every editor gesture and automation operation are not qualified by these checks. Melodyne 5.4.2 previously bound, rendered a default project and saved; its editing and cold recall remain unqualified. No universal ARA conformance or compatibility with every plugin, DAW version or Mac is claimed.
 
 Source caches prepare while playback is stopped. An ARA edit during playback can stop playback for preparation; restart playback explicitly after preparation completes.
 
@@ -61,10 +63,10 @@ Build the app with the exact helper and its matching manifest:
 /opt/homebrew/bin/python3.13 tools/package_app.py \
   --app '/path/build/FL ARA Launcher.app' --output /path/packages \
   --identity 'Developer ID Application: …' \
-  --version 0.1.0-candidate.13 --stem FL-ARA-Launcher-0.1.0-candidate.13-arm64
+  --version 0.1.0-candidate.14 --stem FL-ARA-Launcher-0.1.0-candidate.14-arm64
 ```
 
-The helper must be signed and hash-bound to a ready build manifest. Signing, notarization, runtime evidence and publication are separately recorded. See [candidate release preparation](docs/CANDIDATE_13_RELEASE.md).
+The helper must be signed and hash-bound to a ready build manifest. Signing, notarization, runtime evidence and publication are separately recorded. See [candidate release preparation](docs/CANDIDATE_14_RELEASE.md).
 
 The internal CLI accepts `--headless-export BACKED_UP.flp` for a disposable, read-only-source batch run. It uses FL’s real `-R` batch renderer, prepares ARA after the genuine project loader returns, and reuses the sealed converter RateHold and export driver from the control pipeline. Output and private diagnostics stay in the owned run. The existing driver waits for the output and quits the private FL copy normally; it can answer discard prompts for that disposable batch only. No computer-use gestures are needed. The normal launcher window/project-saving workflow above is unchanged.
 

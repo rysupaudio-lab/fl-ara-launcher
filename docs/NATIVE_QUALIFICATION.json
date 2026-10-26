@@ -1,9 +1,9 @@
 {
   "schema": "rysup.fl-ara-known-profile-qualification/1",
-  "release": "0.1.0-candidate.13",
+  "release": "0.1.0-candidate.14",
   "date": "2026-10-25",
   "qualification_scope": "documented-known-profile",
-  "tested_source_revision": "e734d6d2a0a293200d7fe41574b1e16bac3c0bb9",
+  "tested_source_revision": "ea8102e50589c14ea192fc04b034a159b7be3167",
   "environment": {
     "architecture": "arm64",
     "macos": "27.0",
@@ -16,100 +16,134 @@
     "other_builds": "refused"
   },
   "runtime_binary_sha256": {
-    "FLAppBridge.dylib": "a8c4307519bc878da9530a51289e462854eb49ef9685e7d56ea5d3e5109698c6",
+    "FLAppBridge.dylib": "ad9e2d9edf1116ed14b53b64950adaf8929505ab833594ac4af4e75146811336",
     "RysUpRateHold.dylib": "de6fcb5ad32b1c68a612d70e8c4cc0c207b4990bc1bcf5c491bd9515ce211c38",
     "RysUpExportDriver.dylib": "c4e5f8c9da28a445eba09474e6735bbac7fe85427c33116937109a9af7288b88"
   },
+  "baseline_code_sections_identical_before_and_after_Developer_ID_signing": true,
   "export_pipeline": {
     "native_command": "-R -Ewav <owned saved project> -O<owned output directory>",
     "existing_export_driver_source_revision": "daw-converter 14fe69aa",
     "ara_preparation": "genuine native loader-return boundary",
-    "vendor_instructions_or_files_modified": false,
     "rate_hold": "existing RysUpRateHold source",
-    "headless_device_profile": "built-in devices already at 48 kHz; input disabled; no system-default changes requested"
+    "headless_device_profile": "Built-in devices, input disabled; sealed RateHold supplies process48k without hardware or system-default changes",
+    "installed_vendor_files_modified": false,
+    "vendor_instruction_bytes_modified": false,
+    "private_application_copy_resigned": true
   },
-  "cold_export_acceptance": {
-    "schema": "rysup.fl-native-batch-three-cold-runs/1",
-    "pass": true,
-    "runs": 3,
-    "sha256": "bb4dbd79580ddfd86e097e6be1eaaca7e09f1670d0d199c4a040cda2ec998047",
-    "sample_identical": true,
-    "file_identical": true,
-    "sample_rate": 48000,
-    "sample_format": "FLOAT",
-    "frames": 276000,
-    "channels": 2,
-    "activity_matches_control": true,
-    "control_is_ara_processed_reference": false,
-    "normal_exit_each_run": true,
-    "no_user_UI_actions_in_verified_runs": true,
-    "input_sha256": "62da4f3671bc4342197593062e9248ddc64dc901fae8ed4f8b2c9d9c38964462"
-  },
-  "nonzero_values_per_half_second": [
-    47996,
-    47994,
-    47998,
-    47994,
-    28,
-    0,
-    47995,
-    47997,
-    960,
-    0,
-    47997,
-    23999
-  ],
-  "stock_control": {
-    "sha256": "843103458b6a5fb3c972efb13ca244027ea583f9c50a352b1ef8ce6d2e98f562",
-    "purpose": "format and arrangement activity only",
-    "is_ara_processed_reference": false
-  },
-  "plugins": [
+  "audible_editing_status": "verified for autochoir1.0.0 gain and Detune through native FL background exports",
+  "native_exports": [
     {
-      "name": "autochoir",
-      "vendor": "offwhite",
-      "version": "1.0.0",
-      "format": "VST3",
-      "observed": [
-        "genuine ARA 2 binding",
-        "six full/cropped/reused mono/stereo clips",
-        "native project save with two ARA/state envelopes (candidate11)",
-        "paired Formant+5 ordinary state stored",
-        "three independent candidate13 saved-project exports with identical file/PCM data and normal exits"
+      "case": "baseline",
+      "wav_sha256": "7dbb3590891c45817d785a306e102225d1aa26ab19d83d46820bf1db975099a0",
+      "frames": 276000,
+      "sample_rate": 48000,
+      "sample_format": "float",
+      "channels": 2,
+      "normal_exit": true,
+      "source_unchanged": true,
+      "bridge_sha256": "1e44c5d9e703f8ad1078f1d50005e48ecc0b3beb71a12780e7eb7f63519a25d8",
+      "current_generated_stems_each_insert": true,
+      "applied_frames_each_insert": [
+        180000,
+        180000
       ],
-      "not_proven": [
-        "audible Formant DSP change against an independent ARA-processed reference",
-        "every editor operation or parameter automation"
-      ],
-      "latest_parameter_ab": {
-        "baseline_detune": 0.03,
-        "changed_detune": 0.05,
-        "installed_candidate13_app": true,
-        "changed_sample_values": 0,
-        "max_absolute_difference": 0.0,
-        "rms_difference": 0.0,
-        "both_wav_sha256": "bb4dbd79580ddfd86e097e6be1eaaca7e09f1670d0d199c4a040cda2ec998047",
-        "interpretation": "This parameter change did not alter the render. Working audible ARA edits are not established; the cause is unresolved."
-      }
+      "held_frames_each_insert": [
+        0,
+        0
+      ]
     },
     {
-      "name": "Melodyne",
-      "vendor": "Celemony",
-      "version": "5.4.2",
-      "format": "VST3",
-      "evidence_build": "candidate12 before batch-adapter repair",
-      "observed": [
-        "genuine ARA binding",
-        "six-clip default-state native export",
-        "owned native project save on normal Quit"
+      "case": "gain-minus20",
+      "wav_sha256": "652cd4ec65419040fadec93fdaf21cab46fa29c35b8e30fc2eb6af5f328be134",
+      "frames": 276000,
+      "sample_rate": 48000,
+      "sample_format": "float",
+      "channels": 2,
+      "normal_exit": true,
+      "source_unchanged": true,
+      "bridge_sha256": "ad9e2d9edf1116ed14b53b64950adaf8929505ab833594ac4af4e75146811336",
+      "current_generated_stems_each_insert": true,
+      "applied_frames_each_insert": [
+        180000,
+        180000
       ],
-      "not_proven": [
-        "editing compatibility",
-        "cold recall",
-        "independent processed-audio parity"
+      "held_frames_each_insert": [
+        0,
+        0
+      ]
+    },
+    {
+      "case": "detune-max",
+      "wav_sha256": "8ee64a315305b9bc38abd5f0ad24116905491be566bb60ce6f8646edc68b59b0",
+      "frames": 276000,
+      "sample_rate": 48000,
+      "sample_format": "float",
+      "channels": 2,
+      "normal_exit": true,
+      "source_unchanged": true,
+      "bridge_sha256": "ad9e2d9edf1116ed14b53b64950adaf8929505ab833594ac4af4e75146811336",
+      "current_generated_stems_each_insert": true,
+      "applied_frames_each_insert": [
+        180000,
+        180000
+      ],
+      "held_frames_each_insert": [
+        0,
+        0
       ]
     }
   ],
+  "audible_edits": {
+    "gain": {
+      "sample_rate": 48000,
+      "frames": 276000,
+      "baseline_gain_db": -10,
+      "changed_gain_db": -20,
+      "measured_gain_change_db": -9.96854348300413,
+      "changed_sample_values": 360000,
+      "max_difference": 0.3865600675344467,
+      "rms_difference": 0.06850937078678324,
+      "fixed_expected_gain": 0.31622776601683794,
+      "fixed_gain_max_residual": 0.1527453205964552,
+      "fixed_gain_residual_rms_db": -54.316400771425805,
+      "no_alignment_or_gain_fitting": true,
+      "metric_source": "existing Parity Kit kit.dsp.rms_db",
+      "wav_sha256": "652cd4ec65419040fadec93fdaf21cab46fa29c35b8e30fc2eb6af5f328be134",
+      "normal_exit": true
+    },
+    "detune": {
+      "sample_rate": 48000,
+      "frames": 276000,
+      "baseline_detune": 0.03,
+      "changed_detune": 0.05,
+      "changed_sample_values": 360000,
+      "max_difference": 0.5841602236032486,
+      "rms_difference": 0.10428474046304122,
+      "rms_difference_db": -19.758405502019485,
+      "baseline_rms_db": -20.08717754730091,
+      "edited_rms_db": -20.272742355973705,
+      "no_alignment_or_gain_fitting": true,
+      "metric_source": "existing Parity Kit kit.dsp.rms_db",
+      "wav_sha256": "8ee64a315305b9bc38abd5f0ad24116905491be566bb60ce6f8646edc68b59b0",
+      "normal_exit": true
+    }
+  },
+  "plugin": {
+    "name": "autochoir",
+    "vendor": "offwhite",
+    "version": "1.0.0",
+    "format": "VST3",
+    "executable_sha256": "390c549fa3b3e546d3ee4c9a7041dab0149e9f0944eddce403c0abce6783e43d",
+    "readiness_adapter": "Exact-image read-only generation observation; public ARA sample-access renewal for stale initial generations; no private plugin calls/writes",
+    "current_generation_parameters_checked": [
+      "Detune",
+      "Detune Spread",
+      "Variation Rate period",
+      "Formant Shift",
+      "Formant Drift"
+    ]
+  },
   "supported_audio_profile": {
     "source_sample_rate": 48000,
     "source_format": "resident PCM16 mono/stereo",
@@ -129,11 +163,12 @@
     "owned_test_processes_remaining": 0
   },
   "limits": [
-    "Experimental prerelease; no universal ARA conformance or vendor certification claim",
-    "Other FL builds, Intel, Windows and untested macOS versions are not qualified",
+    "Experimental exact FL26.1.7.5421/arm64 profile; no universal ARA or vendor certification",
+    "Gain edit measured about10dB; cross-run waveforms are not claimed to be bit-identical after gain normalization",
+    "Headless native saved-state edits verified; every manual editor gesture and automation operation is not covered",
+    "Melodyne5.4.2 prior binding/default-export/save only; editing and cold recall remain unqualified",
+    "Other plugins and autochoir executable builds need their own evidence; the exact-image readiness adapter is not applied to unknown binaries",
     "Patched projects must be reopened/saved through this launcher; unpatched FL may discard extended state",
-    "Internal batch return hook qualifies ordinary raw-LR arm64 loader returns, not arbitrary C++ unwinding",
-    "Stock control is not an ARA-processed audio reference; DSP/editor parity is not established"
-  ],
-  "audible_editing_status": "unfinished: latest tested Detune parameter A/B produced no audio change"
+    "No independent processed-audio parity or broad DAW/OS/plugin-version matrix is claimed"
+  ]
 }
